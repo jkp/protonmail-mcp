@@ -11,14 +11,14 @@ class TestBuildAuth:
         with patch.dict(os.environ, {}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             assert _build_auth() is None
 
     def test_returns_none_with_partial_credentials(self) -> None:
         with patch.dict(os.environ, {"GITHUB_CLIENT_ID": "id_only"}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             assert _build_auth() is None
 
     def test_returns_provider_with_full_credentials(self) -> None:
@@ -30,7 +30,7 @@ class TestBuildAuth:
         with patch.dict(os.environ, env, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             provider = _build_auth()
             assert provider is not None
 
@@ -40,14 +40,14 @@ class TestBuildMiddleware:
         with patch.dict(os.environ, {}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             assert _build_middleware() == []
 
     def test_returns_middleware_with_allowlist(self) -> None:
         with patch.dict(os.environ, {"OAUTH_ALLOWED_USERS": "alice,bob"}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             middleware = _build_middleware()
             assert len(middleware) == 1
 
@@ -55,7 +55,7 @@ class TestBuildMiddleware:
         with patch.dict(os.environ, {"OAUTH_ALLOWED_USERS": "alice,bob"}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             middleware = _build_middleware()
             # Extract the auth check function from the middleware
             auth_fn = middleware[0].auth
@@ -69,7 +69,7 @@ class TestBuildMiddleware:
         with patch.dict(os.environ, {"OAUTH_ALLOWED_USERS": "alice,bob"}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             middleware = _build_middleware()
             auth_fn = middleware[0].auth
             from unittest.mock import MagicMock
@@ -82,7 +82,7 @@ class TestBuildMiddleware:
         with patch.dict(os.environ, {"OAUTH_ALLOWED_USERS": "alice"}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             middleware = _build_middleware()
             auth_fn = middleware[0].auth
             from unittest.mock import MagicMock
@@ -95,7 +95,7 @@ class TestBuildMiddleware:
         with patch.dict(os.environ, {"OAUTH_ALLOWED_USERS": " alice , bob "}, clear=True):
             from protonmail_mcp import server
 
-            server.settings = server.Settings()
+            server.settings = server.Settings(_env_file=None)
             middleware = _build_middleware()
             auth_fn = middleware[0].auth
             from unittest.mock import MagicMock

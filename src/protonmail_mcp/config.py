@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(env_prefix="", env_nested_delimiter="__", env_file=".env", extra="ignore")
 
     # Himalaya
     himalaya_bin: str = "himalaya"
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     oauth_base_url: str | None = None
     oauth_allowed_users: str | None = None  # comma-separated GitHub usernames
 
-    # MCP transport (prefixed env vars)
-    transport: str = Field(default="stdio", validation_alias="PROTONMAIL_MCP_TRANSPORT")
-    host: str = Field(default="0.0.0.0", validation_alias="PROTONMAIL_MCP_HOST")
-    port: int = Field(default=10143, validation_alias="PROTONMAIL_MCP_PORT")
+    # MCP transport
+    protonmail_mcp_transport: str = "stdio"
+    protonmail_mcp_host: str = "0.0.0.0"
+    protonmail_mcp_port: int = 10143

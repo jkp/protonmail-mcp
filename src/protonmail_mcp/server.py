@@ -19,7 +19,7 @@ def _build_auth():
     return GitHubProvider(
         client_id=settings.github_client_id,
         client_secret=settings.github_client_secret,
-        base_url=settings.oauth_base_url or f"http://localhost:{settings.port}",
+        base_url=settings.oauth_base_url or f"http://localhost:{settings.protonmail_mcp_port}",
     )
 
 
@@ -72,7 +72,7 @@ import protonmail_mcp.tools.searching  # noqa: F401, E402
 
 def main() -> None:
     """Entry point for the MCP server."""
-    if settings.transport == "http":
-        mcp.run(transport="http", host=settings.host, port=settings.port)
+    if settings.protonmail_mcp_transport == "http":
+        mcp.run(transport="http", host=settings.protonmail_mcp_host, port=settings.protonmail_mcp_port)
     else:
         mcp.run()
