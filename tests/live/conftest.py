@@ -120,12 +120,20 @@ async def poll_for_email(
 @pytest.fixture
 async def live_client():
     """Function-scoped MCP client for live tests. Resets account after each test."""
+    from fastmcp.server.middleware import AuthMiddleware
+
     from protonmail_mcp.server import himalaya
 
     original_account = himalaya.account
-    async with Client(mcp) as c:
-        yield c
-    himalaya.account = original_account
+    # Strip auth middleware — in-memory client has no OAuth token
+    original_middleware = list(mcp.middleware)
+    mcp.middleware = [m for m in mcp.middleware if not isinstance(m, AuthMiddleware)]
+    try:
+        async with Client(mcp) as c:
+            yield c
+    finally:
+        mcp.middleware = original_middleware
+        himalaya.account = original_account
 
 
 async def cleanup_test_emails(client: Client) -> None:
