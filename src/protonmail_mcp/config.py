@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     # Notmuch
     notmuch_bin: str = "notmuch"
+    notmuch_config: str | None = None
     maildir_root: str | None = None
     notmuch_timeout: int = 30
 

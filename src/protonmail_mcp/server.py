@@ -19,6 +19,7 @@ himalaya = HimalayaClient(
 
 notmuch = NotmuchSearcher(
     bin_path=settings.notmuch_bin,
+    config_path=settings.notmuch_config,
     maildir_root=settings.maildir_root or "",
     timeout=settings.notmuch_timeout,
 )

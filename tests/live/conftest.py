@@ -53,10 +53,19 @@ def _notmuch_available() -> bool:
     if not shutil.which("notmuch"):
         return False
     try:
+        import os
+
+        from protonmail_mcp.config import Settings
+
+        env = None
+        settings = Settings()
+        if settings.notmuch_config:
+            env = {**os.environ, "NOTMUCH_CONFIG": settings.notmuch_config}
         result = subprocess.run(
             ["notmuch", "count", "*"],
             capture_output=True,
             timeout=10,
+            env=env,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):

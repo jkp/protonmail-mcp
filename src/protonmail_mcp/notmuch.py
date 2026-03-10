@@ -51,10 +51,12 @@ class NotmuchSearcher:
     def __init__(
         self,
         bin_path: str = "notmuch",
+        config_path: str | None = None,
         maildir_root: str = "",
         timeout: int = 30,
     ) -> None:
         self.bin_path = bin_path
+        self.config_path = config_path
         self.maildir_root = maildir_root
         self.timeout = timeout
 
@@ -63,10 +65,17 @@ class NotmuchSearcher:
         cmd = [self.bin_path, *args]
         logger.debug("notmuch.run", cmd=cmd)
 
+        env = None
+        if self.config_path:
+            import os
+
+            env = {**os.environ, "NOTMUCH_CONFIG": self.config_path}
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         try:
