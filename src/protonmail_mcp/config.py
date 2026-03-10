@@ -1,11 +1,12 @@
 """Configuration via environment variables using pydantic-settings."""
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="", env_nested_delimiter="__", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="", env_nested_delimiter="__", env_file=".env", extra="ignore"
+    )
 
     # Himalaya
     himalaya_bin: str = "himalaya"
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     oauth_base_url: str | None = None
     oauth_allowed_users: str | None = None  # comma-separated GitHub usernames
+
+    # Logging
+    log_level: str = "INFO"
 
     # MCP transport
     protonmail_mcp_transport: str = "stdio"

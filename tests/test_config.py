@@ -15,6 +15,7 @@ class TestSettings:
         assert settings.himalaya_timeout == 30
         assert settings.notmuch_bin == "notmuch"
         assert settings.notmuch_timeout == 30
+        assert settings.log_level == "INFO"
         assert settings.protonmail_mcp_transport == "stdio"
         assert settings.protonmail_mcp_host == "0.0.0.0"
         assert settings.protonmail_mcp_port == 10143
@@ -72,3 +73,9 @@ class TestSettings:
         assert settings.github_client_secret == "test_secret"
         assert settings.oauth_base_url == "https://example.com"
         assert settings.oauth_allowed_users == "alice,bob"
+
+    def test_log_level_env_override(self) -> None:
+        """Log level should be configurable via env var."""
+        with patch.dict(os.environ, {"LOG_LEVEL": "DEBUG"}, clear=True):
+            settings = Settings(_env_file=None)
+        assert settings.log_level == "DEBUG"

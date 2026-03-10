@@ -2,7 +2,11 @@
 
 from typing import Any
 
+import structlog
+
 from protonmail_mcp.server import mcp, notmuch
+
+logger = structlog.get_logger()
 
 
 @mcp.tool(
@@ -19,7 +23,9 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         limit: Maximum number of results to return
         offset: Number of results to skip
     """
+    logger.info("tool.search", query=query, limit=limit, offset=offset)
     results = await notmuch.search(query, limit=limit, offset=offset)
+    logger.info("tool.search.done", query=query, count=len(results))
     return [
         {
             "uid": r.uid,

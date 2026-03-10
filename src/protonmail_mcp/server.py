@@ -1,12 +1,17 @@
 """FastMCP server instance and entry point."""
 
+import structlog
 from fastmcp import FastMCP
 
 from protonmail_mcp.config import Settings
 from protonmail_mcp.himalaya import HimalayaClient
+from protonmail_mcp.logging import configure_logging
 from protonmail_mcp.notmuch import NotmuchSearcher
 
 settings = Settings()
+configure_logging(settings.log_level)
+
+logger = structlog.get_logger()
 
 
 def _build_auth():
@@ -35,9 +40,14 @@ def _build_middleware():
 
     def require_allowed_user(ctx: AuthContext) -> bool:
         if ctx.token is None:
+            logger.warning("auth.rejected", reason="no_token")
             return False
         login = ctx.token.claims.get("login", "")
-        return login in allowed
+        if login in allowed:
+            logger.info("auth.allowed", login=login)
+            return True
+        logger.warning("auth.rejected", login=login, reason="not_in_allowlist")
+        return False
 
     return [AuthMiddleware(auth=require_allowed_user)]
 
@@ -72,7 +82,17 @@ import protonmail_mcp.tools.searching  # noqa: F401, E402
 
 def main() -> None:
     """Entry point for the MCP server."""
+    logger.info(
+        "server.starting",
+        transport=settings.protonmail_mcp_transport,
+        host=settings.protonmail_mcp_host,
+        port=settings.protonmail_mcp_port,
+        auth_enabled=settings.github_client_id is not None,
+        log_level=settings.log_level,
+    )
     if settings.protonmail_mcp_transport == "http":
-        mcp.run(transport="http", host=settings.protonmail_mcp_host, port=settings.protonmail_mcp_port)
+        mcp.run(
+            transport="http", host=settings.protonmail_mcp_host, port=settings.protonmail_mcp_port
+        )
     else:
         mcp.run()

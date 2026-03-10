@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import structlog
@@ -59,8 +60,12 @@ class HimalayaClient:
     ) -> str:
         """Run a himalaya command and return raw stdout."""
         cmd = self._build_args(*args, account=account)
-        logger.debug("himalaya.run", cmd=cmd)
+        # Extract subcommand (e.g., "envelope list", "template send") for logging
+        subcommand = " ".join(a for a in args if not a.startswith("--") and a != self.bin_path)
+        log = logger.bind(subcommand=subcommand)
+        log.debug("himalaya.exec", cmd=cmd)
 
+        t0 = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -75,15 +80,26 @@ class HimalayaClient:
             )
         except TimeoutError:
             proc.kill()
+            elapsed = time.monotonic() - t0
+            log.error("himalaya.timeout", elapsed_s=round(elapsed, 2), timeout=self.timeout)
             raise HimalayaError(
                 f"himalaya command timed out after {self.timeout}s: {' '.join(cmd)}",
                 returncode=-1,
             )
 
+        elapsed = time.monotonic() - t0
+
         if proc.returncode != 0:
             stderr_str = stderr_bytes.decode().strip()
+            log.error(
+                "himalaya.error",
+                returncode=proc.returncode,
+                stderr=stderr_str,
+                elapsed_s=round(elapsed, 2),
+            )
             raise HimalayaError(stderr_str, returncode=proc.returncode or -1)
 
+        log.info("himalaya.ok", elapsed_s=round(elapsed, 2), bytes=len(stdout_bytes))
         return stdout_bytes.decode()
 
     async def run_json(self, *args: str, account: str | None = None) -> Any:
@@ -92,4 +108,5 @@ class HimalayaClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
+            logger.error("himalaya.json_parse_error", error=str(e))
             raise HimalayaError(f"Failed to parse himalaya JSON output: {e}") from e

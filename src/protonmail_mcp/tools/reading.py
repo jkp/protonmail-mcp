@@ -5,9 +5,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from protonmail_mcp.convert import html_to_markdown
 from protonmail_mcp.server import himalaya, mcp
 from protonmail_mcp.template import parse_template
+
+logger = structlog.get_logger()
 
 _LARGE_ATTACHMENT_THRESHOLD = 10 * 1024 * 1024  # 10MB
 
@@ -22,6 +26,7 @@ async def read_email(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
         email_id: The email ID/UID to read
         folder: The folder containing the email
     """
+    logger.info("tool.read_email", email_id=email_id, folder=folder)
     # himalaya message read returns a JSON string (template format), not a structured object
     raw = await himalaya.run_json("message", "read", email_id, "--folder", folder)
     parsed = parse_template(raw)
@@ -32,6 +37,12 @@ async def read_email(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
     else:
         body = parsed["text/plain"]
 
+    logger.info(
+        "tool.read_email.done",
+        email_id=email_id,
+        subject=parsed["subject"],
+        body_len=len(body),
+    )
     return {
         "id": email_id,
         "from": parsed["from"],
@@ -58,6 +69,7 @@ async def download_attachment(email_id: str, folder: str, filename: str) -> dict
         folder: The folder containing the email
         filename: The attachment filename to download
     """
+    logger.info("tool.download_attachment", email_id=email_id, folder=folder, filename=filename)
     tmpdir = tempfile.mkdtemp()
     await himalaya.run(
         "attachment",
@@ -78,6 +90,7 @@ async def download_attachment(email_id: str, folder: str, filename: str) -> dict
             break
 
     if target is None:
+        logger.warning("tool.download_attachment.not_found", email_id=email_id, filename=filename)
         return {"error": f"Attachment '{filename}' not found"}
 
     size = target.stat().st_size
@@ -91,4 +104,5 @@ async def download_attachment(email_id: str, folder: str, filename: str) -> dict
         content = target.read_bytes()
         result["content_base64"] = base64.b64encode(content).decode()
 
+    logger.info("tool.download_attachment.done", email_id=email_id, filename=filename, size=size)
     return result

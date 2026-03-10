@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, patch
 
 from protonmail_mcp.tools.reading import download_attachment, read_email
 
-
 SAMPLE_TEMPLATE_HTML = (
     "From: Alice <alice@example.com>\n"
     "To: bob@example.com\n"

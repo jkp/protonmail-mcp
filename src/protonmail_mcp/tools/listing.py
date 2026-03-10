@@ -2,8 +2,12 @@
 
 from typing import Any
 
+import structlog
+
 from protonmail_mcp.models import Envelope, Folder
 from protonmail_mcp.server import himalaya, mcp
+
+logger = structlog.get_logger()
 
 
 @mcp.tool(
@@ -21,6 +25,7 @@ async def list_emails(
         page: Page number (1-indexed)
         page_size: Number of emails per page
     """
+    logger.info("tool.list_emails", folder=folder, page=page, page_size=page_size)
     data = await himalaya.run_json(
         "envelope",
         "list",
@@ -32,6 +37,7 @@ async def list_emails(
         str(page_size),
     )
     envelopes = [Envelope.model_validate(item) for item in data]
+    logger.info("tool.list_emails.done", count=len(envelopes))
     return [
         {
             "id": e.id,
@@ -50,6 +56,8 @@ async def list_emails(
 )
 async def list_folders() -> list[dict[str, Any]]:
     """List all mail folders."""
+    logger.info("tool.list_folders")
     data = await himalaya.run_json("folder", "list")
     folders = [Folder.model_validate(item) for item in data]
+    logger.info("tool.list_folders.done", count=len(folders))
     return [{"name": f.name, "desc": f.desc} for f in folders]

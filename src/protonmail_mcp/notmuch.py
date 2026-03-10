@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,8 @@ class NotmuchSearcher:
     async def _run(self, *args: str) -> str:
         """Run a notmuch command and return stdout."""
         cmd = [self.bin_path, *args]
-        logger.debug("notmuch.run", cmd=cmd)
+        log = logger.bind(subcommand=args[0] if args else "")
+        log.debug("notmuch.exec", cmd=cmd)
 
         env = None
         if self.config_path:
@@ -71,6 +73,7 @@ class NotmuchSearcher:
 
             env = {**os.environ, "NOTMUCH_CONFIG": self.config_path}
 
+        t0 = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -85,11 +88,23 @@ class NotmuchSearcher:
             )
         except TimeoutError:
             proc.kill()
+            elapsed = time.monotonic() - t0
+            log.error("notmuch.timeout", elapsed_s=round(elapsed, 2), timeout=self.timeout)
             raise NotmuchError(f"notmuch command timed out after {self.timeout}s")
 
-        if proc.returncode != 0:
-            raise NotmuchError(stderr_bytes.decode().strip())
+        elapsed = time.monotonic() - t0
 
+        if proc.returncode != 0:
+            stderr_str = stderr_bytes.decode().strip()
+            log.error(
+                "notmuch.error",
+                returncode=proc.returncode,
+                stderr=stderr_str,
+                elapsed_s=round(elapsed, 2),
+            )
+            raise NotmuchError(stderr_str)
+
+        log.info("notmuch.ok", elapsed_s=round(elapsed, 2), bytes=len(stdout_bytes))
         return stdout_bytes.decode()
 
     async def search(
@@ -100,7 +115,7 @@ class NotmuchSearcher:
     ) -> list[SearchResult]:
         """Search notmuch and return results with IMAP UIDs and folders.
 
-        1. notmuch search --output=files <query> → Maildir file paths
+        1. notmuch search --output=files <query> -> Maildir file paths
         2. Extract UID from filename (,U=<uid>)
         3. Extract folder from path
         4. Return structured results

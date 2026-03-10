@@ -23,8 +23,16 @@ def _parse_result(result: Any) -> Any:
 
 @pytest.fixture
 async def client():
-    async with Client(mcp) as c:
-        yield c
+    from fastmcp.server.middleware import AuthMiddleware
+
+    # Remove auth middleware that may be loaded from .env at import time
+    original = list(mcp.middleware)
+    mcp.middleware = [m for m in mcp.middleware if not isinstance(m, AuthMiddleware)]
+    try:
+        async with Client(mcp) as c:
+            yield c
+    finally:
+        mcp.middleware = original
 
 
 class TestServerToolRegistration:

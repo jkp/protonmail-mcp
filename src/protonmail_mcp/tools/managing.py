@@ -2,7 +2,11 @@
 
 from typing import Any
 
+import structlog
+
 from protonmail_mcp.server import himalaya, mcp
+
+logger = structlog.get_logger()
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Archive Email"})
@@ -13,7 +17,9 @@ async def archive(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
         email_id: The email ID/UID to archive
         folder: Current folder of the email
     """
+    logger.info("tool.archive", email_id=email_id, folder=folder)
     await himalaya.run("message", "move", "Archive", email_id, "--folder", folder)
+    logger.info("tool.archive.done", email_id=email_id)
     return {"status": "archived", "email_id": email_id}
 
 
@@ -25,7 +31,9 @@ async def delete(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
         email_id: The email ID/UID to delete
         folder: Folder containing the email
     """
+    logger.info("tool.delete", email_id=email_id, folder=folder)
     await himalaya.run("message", "delete", email_id, "--folder", folder)
+    logger.info("tool.delete.done", email_id=email_id)
     return {"status": "deleted", "email_id": email_id}
 
 
@@ -38,7 +46,9 @@ async def move_email(email_id: str, from_folder: str, to_folder: str) -> dict[st
         from_folder: Current folder
         to_folder: Destination folder
     """
+    logger.info("tool.move_email", email_id=email_id, from_folder=from_folder, to_folder=to_folder)
     await himalaya.run("message", "move", to_folder, email_id, "--folder", from_folder)
+    logger.info("tool.move_email.done", email_id=email_id, to_folder=to_folder)
     return {"status": "moved", "email_id": email_id, "to_folder": to_folder}
 
 
@@ -53,5 +63,6 @@ async def set_identity(account: str) -> dict[str, Any]:
     Args:
         account: The himalaya account name to use as default
     """
+    logger.info("tool.set_identity", account=account)
     himalaya.account = account
     return {"status": "identity_set", "account": account}

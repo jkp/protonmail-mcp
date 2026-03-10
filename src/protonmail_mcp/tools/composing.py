@@ -3,7 +3,11 @@
 import re
 from typing import Any
 
+import structlog
+
 from protonmail_mcp.server import himalaya, mcp
+
+logger = structlog.get_logger()
 
 
 def _set_subject_in_template(template: str, subject: str) -> str:
@@ -72,6 +76,7 @@ async def send(
         cc: CC recipients (comma-separated)
         account: Optional account/identity to send from
     """
+    logger.info("tool.send", to=to, subject=subject, cc=cc, account=account)
     # Get a blank template with From pre-filled from the account
     result = await himalaya.run_json("template", "write", account=account)
     template = result["content"]
@@ -81,6 +86,7 @@ async def send(
         template = _set_cc_in_template(template, cc)
     template = _inject_body_into_template(template, body)
     await himalaya.run("template", "send", stdin=template, account=account)
+    logger.info("tool.send.done", to=to, subject=subject)
     return {"status": "sent", "to": to, "subject": subject}
 
 
@@ -101,6 +107,9 @@ async def reply(
         reply_all: Whether to reply to all recipients
         account: Optional account/identity to send from
     """
+    logger.info(
+        "tool.reply", email_id=email_id, folder=folder, reply_all=reply_all, account=account
+    )
     # Step 1: Get reply template from himalaya
     reply_args = ["template", "reply", email_id, "--folder", folder]
     if reply_all:
@@ -116,6 +125,7 @@ async def reply(
 
     # Step 4: Send the edited template
     await himalaya.run("template", "send", stdin=edited, account=account)
+    logger.info("tool.reply.done", email_id=email_id)
     return {"status": "sent", "in_reply_to": email_id}
 
 
@@ -136,6 +146,7 @@ async def forward(
         folder: Folder containing the email
         account: Optional account/identity to send from
     """
+    logger.info("tool.forward", email_id=email_id, to=to, folder=folder, account=account)
     # Step 1: Get forward template
     result = await himalaya.run_json(
         "template", "forward", email_id, "--folder", folder, account=account
@@ -148,4 +159,5 @@ async def forward(
 
     # Step 3: Send
     await himalaya.run("template", "send", stdin=edited, account=account)
+    logger.info("tool.forward.done", email_id=email_id, to=to)
     return {"status": "sent", "forwarded_to": to, "original_id": email_id}
