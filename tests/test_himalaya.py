@@ -47,12 +47,17 @@ class TestHimalayaClientRun:
             assert "list" in args
             assert result == output
 
-    async def test_account_flag(self, client_with_account: HimalayaClient) -> None:
+    async def test_account_flag_after_subcommand(self, client_with_account: HimalayaClient) -> None:
+        """--account must come after the subcommand, not before."""
         with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="[]")) as mock_exec:
             await client_with_account.run("folder", "list")
             args = mock_exec.call_args[0]
             assert "--account" in args
             assert "work" in args
+            # --account must come after the subcommand args
+            account_idx = args.index("--account")
+            folder_idx = args.index("folder")
+            assert account_idx > folder_idx
 
     async def test_config_path_flag(self, client_with_account: HimalayaClient) -> None:
         with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="[]")) as mock_exec:

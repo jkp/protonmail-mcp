@@ -33,17 +33,22 @@ class HimalayaClient:
         self.config_path = config_path
 
     def _build_args(self, *args: str, account: str | None = None) -> list[str]:
-        """Build the full argument list for a himalaya command."""
-        cmd = [self.bin_path, "--output", "json"]
+        """Build the full argument list for a himalaya command.
 
-        effective_account = account or self.account
-        if effective_account:
-            cmd.extend(["--account", effective_account])
+        himalaya global options (--output, --config) go before the subcommand,
+        while --account is a subcommand-level flag and goes after.
+        """
+        cmd = [self.bin_path, "--output", "json"]
 
         if self.config_path:
             cmd.extend(["--config", self.config_path])
 
         cmd.extend(args)
+
+        effective_account = account or self.account
+        if effective_account:
+            cmd.extend(["--account", effective_account])
+
         return cmd
 
     async def run(
