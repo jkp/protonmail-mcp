@@ -10,6 +10,25 @@ from protonmail_mcp.server import himalaya, mcp, notmuch
 
 logger = structlog.get_logger()
 
+# Common IMAP folder names with correct case
+_FOLDER_CASE_MAP = {
+    "inbox": "INBOX",
+    "sent": "Sent",
+    "drafts": "Drafts",
+    "trash": "Trash",
+    "archive": "Archive",
+    "spam": "Spam",
+    "starred": "Starred",
+}
+
+
+def _fix_folder_case(match: re.Match) -> str:
+    """Correct folder name case for notmuch (case-sensitive)."""
+    folder = match.group(1)
+    corrected = _FOLDER_CASE_MAP.get(folder.lower(), folder)
+    return f"folder:{corrected}"
+
+
 # Gmail-style query translations to notmuch syntax
 _QUERY_TRANSLATIONS = [
     (re.compile(r"\bhas:attachment\b"), "tag:attachment"),
@@ -17,7 +36,7 @@ _QUERY_TRANSLATIONS = [
     (re.compile(r"\bis:read\b"), "not tag:unread"),
     (re.compile(r"\bis:starred\b"), "tag:flagged"),
     (re.compile(r"\bis:flagged\b"), "tag:flagged"),
-    (re.compile(r"\bin:(\S+)"), r"folder:\1"),
+    (re.compile(r"\bin:(\S+)"), _fix_folder_case),
     (re.compile(r"\blabel:(\S+)"), r"tag:\1"),
     (re.compile(r"\bfilename:(\S+)"), r"attachment:\1"),
     (re.compile(r"\bnewer_than:(\d+)d\b"), r"date:\1days.."),

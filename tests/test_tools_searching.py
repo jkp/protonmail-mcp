@@ -26,8 +26,17 @@ class TestTranslateQuery:
         assert _translate_query("is:starred") == "tag:flagged"
 
     def test_in_folder(self) -> None:
-        assert _translate_query("in:inbox") == "folder:inbox"
-        assert _translate_query("in:sent") == "folder:sent"
+        assert _translate_query("in:inbox") == "folder:INBOX"
+        assert _translate_query("in:sent") == "folder:Sent"
+
+    def test_in_folder_case_correction(self) -> None:
+        assert _translate_query("in:archive") == "folder:Archive"
+        assert _translate_query("in:Archive") == "folder:Archive"
+        assert _translate_query("in:INBOX") == "folder:INBOX"
+        assert _translate_query("in:trash") == "folder:Trash"
+
+    def test_in_folder_unknown_preserves_case(self) -> None:
+        assert _translate_query("in:Folders/Github") == "folder:Folders/Github"
 
     def test_label(self) -> None:
         assert _translate_query("label:important") == "tag:important"
