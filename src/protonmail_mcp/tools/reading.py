@@ -6,13 +6,18 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastmcp.resources import ResourceContent, ResourceResult
+from fastmcp.utilities.types import Image
 
 from protonmail_mcp.convert import html_to_markdown
 from protonmail_mcp.server import himalaya, mcp
 from protonmail_mcp.template import parse_template
 
 logger = structlog.get_logger()
+
+_TEXT_EXTENSIONS = {
+    ".txt", ".csv", ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml", ".log",
+}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 @mcp.tool(
@@ -63,8 +68,7 @@ async def read_email(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
 async def list_attachments(email_id: str, folder: str = "INBOX") -> list[dict[str, Any]]:
     """List attachments on an email without downloading them.
 
-    Use the returned filenames with the attachment resource:
-    attachment://{folder}/{email_id}/{filename}
+    Use the returned filenames with download_attachment to fetch content.
 
     Args:
         email_id: The email ID/UID
@@ -114,24 +118,89 @@ async def _download_to_tmpdir(email_id: str, folder: str, filename: str) -> Path
     return target
 
 
-@mcp.resource("attachment://{folder}/{email_id}/{filename}")
-async def attachment_resource(folder: str, email_id: str, filename: str) -> ResourceResult:
-    """Fetch an email attachment as a binary resource.
+def _extract_pdf_text(path: Path) -> str:
+    """Extract text from a PDF file."""
+    import pymupdf
 
-    Use list_attachments tool first to discover available filenames.
+    doc = pymupdf.open(str(path))
+    pages = []
+    for i, page in enumerate(doc):
+        text = page.get_text("text").strip()
+        if text:
+            pages.append(f"## Page {i + 1}\n\n{text}")
+    doc.close()
+    return "\n\n".join(pages)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "title": "Download Attachment",
+    }
+)
+async def download_attachment(
+    email_id: str,
+    folder: str,
+    filename: str,
+) -> list[str | Image]:
+    """Download and return an email attachment.
+
+    Content is processed server-side for best results:
+    - PDFs: extracted to markdown text
+    - Images: returned as viewable images
+    - Text files (CSV, JSON, XML, etc.): returned as text
+    - Other formats: returned as base64-encoded data
+
+    Use list_attachments first to discover available filenames.
+
+    Args:
+        email_id: The email ID/UID
+        folder: The folder containing the email
+        filename: The attachment filename to download
     """
-    logger.info("resource.attachment", email_id=email_id, folder=folder, filename=filename)
+    logger.info("tool.download_attachment", email_id=email_id, folder=folder, filename=filename)
     target = await _download_to_tmpdir(email_id, folder, filename)
-    data = target.read_bytes()
-    mime_type, _ = mimetypes.guess_type(filename)
-    mime_type = mime_type or "application/octet-stream"
-    logger.info(
-        "resource.attachment.done",
-        email_id=email_id,
-        filename=filename,
-        size=len(data),
-        mime_type=mime_type,
-    )
-    return ResourceResult(
-        contents=[ResourceContent(content=data, mime_type=mime_type)]
-    )
+    suffix = target.suffix.lower()
+    size = target.stat().st_size
+
+    result: list[str | Image]
+
+    if suffix == ".pdf":
+        text = _extract_pdf_text(target)
+        logger.info(
+            "tool.download_attachment.done",
+            email_id=email_id, filename=filename, type="pdf", chars=len(text),
+        )
+        result = [f"# {filename} ({size} bytes)\n\n{text}"]
+
+    elif suffix in _IMAGE_EXTENSIONS:
+        logger.info(
+            "tool.download_attachment.done",
+            email_id=email_id, filename=filename, type="image", size=size,
+        )
+        result = [f"Image: {filename} ({size} bytes)", Image(path=target)]
+
+    elif suffix in _TEXT_EXTENSIONS:
+        text = target.read_text(errors="replace")
+        logger.info(
+            "tool.download_attachment.done",
+            email_id=email_id, filename=filename, type="text", chars=len(text),
+        )
+        result = [f"# {filename} ({size} bytes)\n\n{text}"]
+
+    else:
+        import base64
+
+        encoded = base64.b64encode(target.read_bytes()).decode()
+        mime_type, _ = mimetypes.guess_type(filename)
+        logger.info(
+            "tool.download_attachment.done",
+            email_id=email_id, filename=filename, type="binary", size=size,
+        )
+        result = [
+            f"Binary file: {filename} ({size} bytes, {mime_type or 'unknown type'})\n"
+            f"Base64-encoded content:\n{encoded}"
+        ]
+
+    return result

@@ -44,6 +44,7 @@ class TestServerToolRegistration:
             "list_folders",
             "read_email",
             "list_attachments",
+            "download_attachment",
             "search",
             "send",
             "reply",
@@ -57,7 +58,7 @@ class TestServerToolRegistration:
 
     async def test_tool_count(self, client: Client) -> None:
         tools = await client.list_tools()
-        assert len(tools) == 12
+        assert len(tools) == 13
 
 
 class TestListEmailsIntegration:
