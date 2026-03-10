@@ -33,6 +33,9 @@ def _translate_query(query: str) -> str:
     return translated
 
 
+_STOP_WORDS = {"re:", "fw:", "fwd:", "the", "a", "an", "and", "or", "to", "for", "in", "on", "at", "is"}
+
+
 def _extract_from_addr(authors: str) -> str | None:
     """Extract email address from 'Name <email>' or plain email format."""
     if not authors:
@@ -41,17 +44,37 @@ def _extract_from_addr(authors: str) -> str | None:
     return match.group(1) if match else authors.split()[0]
 
 
+def _pick_subject_keyword(subject: str) -> str | None:
+    """Pick the most distinctive word from a subject for IMAP SEARCH.
+
+    Protonmail Bridge only supports unquoted single-word subject searches.
+    Strips common prefixes (Re:, Fwd:, [bracketed]), then picks the longest
+    word from the remaining subject to maximize distinctiveness.
+    """
+    if not subject:
+        return None
+    # Strip Re:/Fwd: prefixes and [bracketed] groups (e.g. [org/repo])
+    cleaned = re.sub(r"^(Re|Fwd|Fw):\s*", "", subject, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[[^\]]*\]", "", cleaned)
+    words = re.findall(r"[a-zA-Z0-9]+", cleaned)
+    candidates = [w for w in words if w.lower() not in _STOP_WORDS and len(w) > 2]
+    return max(candidates, key=len) if candidates else None
+
+
 async def _resolve_uid(folder: str, subject: str, authors: str) -> str | None:
     """Resolve the correct IMAP UID by searching himalaya for the message.
 
-    Uses from-address query only (Protonmail Bridge IMAP SEARCH doesn't
-    reliably handle combined from+subject queries). Fetches a few candidates
-    and matches by subject in Python.
+    Uses from-address + a single subject keyword for disambiguation.
+    Protonmail Bridge's IMAP SEARCH doesn't support multi-word quoted
+    subject queries, but single unquoted keywords work.
     """
     addr = _extract_from_addr(authors)
     if not addr:
         return None
     query = f"from {addr}"
+    keyword = _pick_subject_keyword(subject)
+    if keyword:
+        query += f" and subject {keyword}"
     try:
         envelopes = await himalaya.run_json(
             "envelope", "list", "--folder", folder, "--page-size", "5", query
@@ -62,7 +85,7 @@ async def _resolve_uid(folder: str, subject: str, authors: str) -> str | None:
         for env in envelopes:
             if env.get("subject") == subject:
                 return str(env["id"])
-        # Fall back to first result from same sender
+        # Fall back to first result
         return str(envelopes[0]["id"])
     except Exception:
         logger.debug("search.uid_resolve_failed", folder=folder, query=query)

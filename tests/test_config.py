@@ -12,7 +12,7 @@ class TestSettings:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(_env_file=None)
         assert settings.himalaya_bin == "himalaya"
-        assert settings.himalaya_timeout == 30
+        assert settings.himalaya_timeout == 60
         assert settings.notmuch_bin == "notmuch"
         assert settings.notmuch_timeout == 30
         assert settings.log_level == "INFO"

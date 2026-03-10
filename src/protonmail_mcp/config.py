@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     himalaya_bin: str = "himalaya"
     himalaya_config_path: str | None = None
     himalaya_account: str | None = None
-    himalaya_timeout: int = 30
+    himalaya_timeout: int = 60
 
     # Notmuch
     notmuch_bin: str = "notmuch"

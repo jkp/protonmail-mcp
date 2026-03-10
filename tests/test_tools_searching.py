@@ -3,7 +3,13 @@
 from unittest.mock import AsyncMock, patch
 
 from protonmail_mcp.models import SearchResult
-from protonmail_mcp.tools.searching import _extract_from_addr, _resolve_uid, _translate_query, search
+from protonmail_mcp.tools.searching import (
+    _extract_from_addr,
+    _pick_subject_keyword,
+    _resolve_uid,
+    _translate_query,
+    search,
+)
 
 
 class TestTranslateQuery:
@@ -57,6 +63,31 @@ class TestExtractFromAddr:
 
     def test_name_with_spaces(self) -> None:
         assert _extract_from_addr("Bob Smith <bob@example.com>") == "bob@example.com"
+
+
+class TestPickSubjectKeyword:
+    def test_picks_longest_word(self) -> None:
+        assert _pick_subject_keyword("Fix the propagation bug") == "propagation"
+
+    def test_skips_stop_words(self) -> None:
+        assert _pick_subject_keyword("Re: the quick fix") == "quick"
+
+    def test_returns_none_for_empty(self) -> None:
+        assert _pick_subject_keyword("") is None
+
+    def test_returns_none_for_only_stop_words(self) -> None:
+        assert _pick_subject_keyword("Re: the a") is None
+
+    def test_skips_short_words(self) -> None:
+        assert _pick_subject_keyword("Go to HQ immediately") == "immediately"
+
+    def test_strips_bracketed_prefixes(self) -> None:
+        result = _pick_subject_keyword("[tinyteamco/verity] fix(workflow): propagate")
+        assert result == "propagate"
+
+    def test_strips_re_prefix(self) -> None:
+        result = _pick_subject_keyword("Re: [org/repo] important update")
+        assert result == "important"
 
 
 class TestResolveUid:
