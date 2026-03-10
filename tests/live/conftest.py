@@ -1,0 +1,151 @@
+"""Live integration test fixtures and helpers.
+
+Tests in this package exercise the full stack against a running Protonmail Bridge.
+They are automatically skipped when himalaya can't reach the Bridge.
+"""
+
+import asyncio
+import json
+import shutil
+import subprocess
+import uuid
+from typing import Any
+
+import pytest
+from fastmcp import Client
+
+from protonmail_mcp.server import mcp
+
+# Unique run ID to tag all test emails for cleanup
+RUN_ID = uuid.uuid4().hex[:12]
+TEST_SUBJECT_PREFIX = "[MCP-TEST]"
+
+
+def _himalaya_available() -> bool:
+    """Check if himalaya can reach Protonmail Bridge by listing folders."""
+    if not shutil.which("himalaya"):
+        return False
+    try:
+        result = subprocess.run(
+            ["himalaya", "folder", "list", "--output", "json"],
+            capture_output=True,
+            timeout=15,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _notmuch_available() -> bool:
+    """Check if notmuch is installed and configured."""
+    if not shutil.which("notmuch"):
+        return False
+    try:
+        result = subprocess.run(
+            ["notmuch", "count", "*"],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+_HIMALAYA_OK = _himalaya_available()
+_NOTMUCH_OK = _notmuch_available()
+
+live = pytest.mark.live
+skip_no_bridge = pytest.mark.skipif(not _HIMALAYA_OK, reason="himalaya/Bridge not available")
+skip_no_notmuch = pytest.mark.skipif(not _NOTMUCH_OK, reason="notmuch not available")
+
+
+def _parse_result(result: Any) -> Any:
+    """Extract data from a CallToolResult."""
+    if result.data and not isinstance(result.data, list):
+        return result.data
+    text = result.content[0].text
+    return json.loads(text)
+
+
+def make_subject(test_name: str) -> str:
+    """Create a unique, identifiable test email subject."""
+    return f"{TEST_SUBJECT_PREFIX} {RUN_ID} {test_name}"
+
+
+async def poll_for_email(
+    client: Client,
+    subject: str,
+    folder: str = "INBOX",
+    timeout: float = 60.0,
+    interval: float = 2.0,
+) -> dict[str, Any] | None:
+    """Poll list_emails until an email matching subject appears."""
+    elapsed = 0.0
+    while elapsed < timeout:
+        result = await client.call_tool(
+            "list_emails", {"folder": folder, "page_size": 50}
+        )
+        emails = _parse_result(result)
+        for email in emails:
+            if email["subject"] == subject:
+                return email
+        await asyncio.sleep(interval)
+        elapsed += interval
+    return None
+
+
+async def _cleanup_test_emails(client: Client, folders: list[str]) -> None:
+    """Delete any emails with our test subject prefix + run ID."""
+    for folder in folders:
+        try:
+            result = await client.call_tool(
+                "list_emails", {"folder": folder, "page_size": 50}
+            )
+            emails = _parse_result(result)
+            for email in emails:
+                if f"{TEST_SUBJECT_PREFIX} {RUN_ID}" in email.get("subject", ""):
+                    try:
+                        await client.call_tool(
+                            "delete", {"email_id": email["id"], "folder": folder}
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Session-scoped event loop for async fixtures."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture(scope="session")
+async def live_client():
+    """Session-scoped MCP client for live tests."""
+    async with Client(mcp) as c:
+        yield c
+
+
+@pytest.fixture(scope="session")
+async def seed_email(live_client: Client) -> dict[str, Any]:
+    """Send a seed email for read-only tests, cleaned up at session end."""
+    subject = make_subject("seed")
+    await live_client.call_tool(
+        "send",
+        {
+            "to": "jamie@kirkpatrick.email",
+            "subject": subject,
+            "body": "This is a seed email for live integration tests.",
+        },
+    )
+    email = await poll_for_email(live_client, subject)
+    assert email is not None, f"Seed email '{subject}' never arrived"
+    yield email
+
+    # Cleanup all test emails from this run
+    await _cleanup_test_emails(
+        live_client, ["INBOX", "Sent", "Archive", "Trash"]
+    )
