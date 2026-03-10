@@ -60,7 +60,7 @@ def _notmuch_available() -> bool:
         env = None
         settings = Settings()
         if settings.notmuch_config:
-            env = {**os.environ, "NOTMUCH_CONFIG": settings.notmuch_config}
+            env = {**os.environ, "NOTMUCH_CONFIG": os.path.expanduser(settings.notmuch_config)}
         result = subprocess.run(
             ["notmuch", "count", "*"],
             capture_output=True,
