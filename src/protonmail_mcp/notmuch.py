@@ -46,6 +46,24 @@ def extract_folder(filepath: str, maildir_root: str) -> str:
     return parts[0] if parts else ""
 
 
+def _first_matching_message(thread: list) -> dict | None:
+    """Extract the first matching message from a notmuch show thread tree.
+
+    The notmuch show JSON structure is: [[[message, [replies]], ...], ...]
+    where each message is a dict with 'match', 'headers', 'filename', etc.
+    """
+    if not thread:
+        return None
+    for item in thread:
+        if isinstance(item, dict) and item.get("match"):
+            return item
+        if isinstance(item, list):
+            result = _first_matching_message(item)
+            if result is not None:
+                return result
+    return None
+
+
 class NotmuchSearcher:
     """Wraps notmuch CLI for search with UID extraction from Maildir paths."""
 
@@ -113,26 +131,48 @@ class NotmuchSearcher:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[SearchResult]:
-        """Search notmuch and return results with IMAP UIDs and folders.
+        """Search notmuch and return results with IMAP UIDs, folders, and metadata.
 
-        1. notmuch search --output=files <query> -> Maildir file paths
-        2. Extract UID from filename (,U=<uid>)
-        3. Extract folder from path
-        4. Return structured results
+        Uses `notmuch show --body=false` to get per-message metadata (subject,
+        from, date) alongside filenames for UID/folder extraction in one call.
         """
-        raw = await self._run("search", "--output=files", query)
+        args = ["show", "--format=json", "--body=false"]
+        if limit is not None:
+            args.extend(["--limit", str(offset + limit)])
+        if offset and limit is None:
+            args.extend(["--limit", str(offset + 100)])
+        args.append(query)
+
+        raw = await self._run(*args)
         if not raw.strip():
             return []
 
-        filepaths = raw.strip().split("\n")
-        results: list[SearchResult] = []
+        try:
+            threads = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise NotmuchError(f"Failed to parse notmuch JSON output: {e}") from e
 
-        for filepath in filepaths:
+        results: list[SearchResult] = []
+        for thread in threads:
+            msg = _first_matching_message(thread)
+            if msg is None:
+                continue
+            filenames = msg.get("filename", [])
+            if not filenames:
+                continue
+            filepath = filenames[0]
             uid = extract_uid(filepath)
             if uid is None:
                 continue
             folder = extract_folder(filepath, self.maildir_root)
-            results.append(SearchResult(uid=uid, folder=folder))
+            headers = msg.get("headers", {})
+            results.append(SearchResult(
+                uid=uid,
+                folder=folder,
+                subject=headers.get("Subject", ""),
+                date=headers.get("Date", ""),
+                authors=headers.get("From", ""),
+            ))
 
         # Apply offset and limit
         results = results[offset:]

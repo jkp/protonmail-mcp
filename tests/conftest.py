@@ -83,6 +83,57 @@ def sample_maildir_paths() -> list[str]:
 
 
 @pytest.fixture
+def sample_notmuch_show_json() -> str:
+    """Sample notmuch show --format=json --body=false output."""
+    return """[
+  [
+    [
+      {
+        "id": "msg1@example.com",
+        "match": true,
+        "excluded": false,
+        "filename": ["/home/user/mail/INBOX/cur/1709020800.hostname,U=42:2,S"],
+        "timestamp": 1709020800,
+        "date_relative": "today",
+        "tags": ["inbox", "unread"],
+        "duplicate": 1,
+        "crypto": {},
+        "headers": {
+          "Subject": "Test Subject",
+          "From": "Alice <alice@example.com>",
+          "To": "bob@example.com",
+          "Date": "Mon, 10 Mar 2026 08:00:00 +0000"
+        }
+      },
+      []
+    ]
+  ],
+  [
+    [
+      {
+        "id": "msg2@example.com",
+        "match": true,
+        "excluded": false,
+        "filename": ["/home/user/mail/Sent/cur/1709020900.hostname,U=100:2,S"],
+        "timestamp": 1709020900,
+        "date_relative": "today",
+        "tags": ["inbox"],
+        "duplicate": 1,
+        "crypto": {},
+        "headers": {
+          "Subject": "Another Subject",
+          "From": "Charlie <charlie@example.com>",
+          "To": "bob@example.com",
+          "Date": "Mon, 10 Mar 2026 09:00:00 +0000"
+        }
+      },
+      []
+    ]
+  ]
+]"""
+
+
+@pytest.fixture
 def sample_notmuch_search_json() -> str:
     """Sample notmuch search --format=json output."""
     return """[

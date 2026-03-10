@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from protonmail_mcp.notmuch import NotmuchError, NotmuchSearcher, extract_folder, extract_uid
+from protonmail_mcp.notmuch import (
+    NotmuchError,
+    NotmuchSearcher,
+    _first_matching_message,
+    extract_folder,
+    extract_uid,
+)
 
 
 class TestExtractUid:
@@ -48,6 +54,35 @@ class TestExtractFolder:
         assert extract_folder(path, "/home/user/mail") == "INBOX"
 
 
+class TestFirstMatchingMessage:
+    def test_finds_match_in_simple_thread(self) -> None:
+        thread = [[{"match": True, "headers": {"Subject": "Test"}}, []]]
+        msg = _first_matching_message(thread)
+        assert msg is not None
+        assert msg["headers"]["Subject"] == "Test"
+
+    def test_skips_non_matching(self) -> None:
+        thread = [
+            [{"match": False, "headers": {"Subject": "No"}}, []],
+            [{"match": True, "headers": {"Subject": "Yes"}}, []],
+        ]
+        msg = _first_matching_message(thread)
+        assert msg is not None
+        assert msg["headers"]["Subject"] == "Yes"
+
+    def test_returns_none_for_empty(self) -> None:
+        assert _first_matching_message([]) is None
+
+    def test_finds_match_in_nested_replies(self) -> None:
+        thread = [[
+            {"match": False, "headers": {"Subject": "Parent"}},
+            [[{"match": True, "headers": {"Subject": "Reply"}}, []]],
+        ]]
+        msg = _first_matching_message(thread)
+        assert msg is not None
+        assert msg["headers"]["Subject"] == "Reply"
+
+
 def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0) -> AsyncMock:
     proc = AsyncMock()
     proc.communicate = AsyncMock(return_value=(stdout.encode(), stderr.encode()))
@@ -65,62 +100,53 @@ class TestNotmuchSearcher:
             timeout=10,
         )
 
-    async def test_search_returns_results_with_uids(
-        self, searcher: NotmuchSearcher, sample_maildir_paths: list[str]
+    async def test_search_returns_results_with_metadata(
+        self, searcher: NotmuchSearcher, sample_notmuch_show_json: str
     ) -> None:
-        stdout = "\n".join(sample_maildir_paths)
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=stdout)):
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=sample_notmuch_show_json)):
             results = await searcher.search("tag:inbox")
-            assert len(results) == 4
+            assert len(results) == 2
             assert results[0].uid == "42"
             assert results[0].folder == "INBOX"
-            assert results[1].uid == "43"
-            assert results[2].uid == "100"
-            assert results[2].folder == "Sent"
-            assert results[3].uid == "200"
-            assert results[3].folder == "Work/Projects"
+            assert results[0].subject == "Test Subject"
+            assert results[0].authors == "Alice <alice@example.com>"
+            assert results[0].date == "Mon, 10 Mar 2026 08:00:00 +0000"
+            assert results[1].uid == "100"
+            assert results[1].folder == "Sent"
+            assert results[1].subject == "Another Subject"
 
     async def test_search_skips_files_without_uid(self, searcher: NotmuchSearcher) -> None:
-        paths = [
-            "/home/user/mail/INBOX/cur/file_without_uid:2,S",
-            "/home/user/mail/INBOX/cur/1709020800.hostname,U=42:2,S",
-        ]
-        stdout = "\n".join(paths)
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=stdout)):
+        show_json = """[[[{
+            "match": true, "filename": ["/home/user/mail/INBOX/cur/no_uid:2,S"],
+            "headers": {"Subject": "No UID"}, "crypto": {}, "tags": []
+        }, []]]]"""
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=show_json)):
             results = await searcher.search("tag:inbox")
-            assert len(results) == 1
-            assert results[0].uid == "42"
+            assert results == []
 
     async def test_search_empty_results(self, searcher: NotmuchSearcher) -> None:
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="")):
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="[]")):
             results = await searcher.search("tag:nonexistent")
             assert results == []
 
-    async def test_search_with_limit(self, searcher: NotmuchSearcher) -> None:
-        paths = [
-            f"/home/user/mail/INBOX/cur/file{i}.hostname,U={i}:2,S" for i in range(10)
-        ]
-        stdout = "\n".join(paths)
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=stdout)):
-            results = await searcher.search("*", limit=3)
-            assert len(results) == 3
+    async def test_search_with_limit(self, searcher: NotmuchSearcher, sample_notmuch_show_json: str) -> None:
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=sample_notmuch_show_json)):
+            results = await searcher.search("*", limit=1)
+            assert len(results) == 1
+            assert results[0].uid == "42"
 
-    async def test_search_with_offset(self, searcher: NotmuchSearcher) -> None:
-        paths = [
-            f"/home/user/mail/INBOX/cur/file{i}.hostname,U={i}:2,S" for i in range(10)
-        ]
-        stdout = "\n".join(paths)
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=stdout)):
-            results = await searcher.search("*", limit=3, offset=2)
-            assert len(results) == 3
-            assert results[0].uid == "2"
+    async def test_search_with_offset(self, searcher: NotmuchSearcher, sample_notmuch_show_json: str) -> None:
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout=sample_notmuch_show_json)):
+            results = await searcher.search("*", limit=1, offset=1)
+            assert len(results) == 1
+            assert results[0].uid == "100"
 
     async def test_search_passes_query_to_notmuch(self, searcher: NotmuchSearcher) -> None:
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="")) as mock_exec:
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_process(stdout="[]")) as mock_exec:
             await searcher.search("from:alice@example.com AND tag:inbox")
             args = mock_exec.call_args[0]
-            assert "search" in args
-            assert "--output=files" in args
+            assert "show" in args
+            assert "--body=false" in args
             assert "from:alice@example.com AND tag:inbox" in args
 
     async def test_search_timeout(self, searcher: NotmuchSearcher) -> None:
