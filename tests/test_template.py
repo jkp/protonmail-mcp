@@ -53,6 +53,30 @@ class TestParseTemplate:
         result = parse_template(tpl)
         assert result["date"] == "Mon, 10 Mar 2026 08:00:00 +0000"
 
+    def test_closing_tag_with_leading_whitespace(self) -> None:
+        """Regression: himalaya sometimes indents <#/part>."""
+        tpl = "From: a@b.com\nSubject: Test\n\n<#part type=text/html>\n<p>Hello</p>\n     <#/part>\n"
+        result = parse_template(tpl)
+        assert result["text/html"] == "<p>Hello</p>"
+
+    def test_no_newline_before_closing_tag(self) -> None:
+        """Regression: content directly abutting closing tag."""
+        tpl = "From: a@b.com\nSubject: Test\n\n<#part type=text/plain>\nHello world<#/part>\n"
+        result = parse_template(tpl)
+        assert result["text/plain"] == "Hello world"
+
+    def test_no_newline_after_opening_tag(self) -> None:
+        """Regression: content directly abutting opening tag."""
+        tpl = "From: a@b.com\nSubject: Test\n\n<#part type=text/plain>Hello world\n<#/part>\n"
+        result = parse_template(tpl)
+        assert result["text/plain"] == "Hello world"
+
+    def test_whitespace_and_no_newlines_combined(self) -> None:
+        """Regression: opening tag runs into content + indented closing tag."""
+        tpl = "From: a@b.com\nSubject: Test\n\n<#part type=text/html><p>Hi</p>\n  <#/part>\n"
+        result = parse_template(tpl)
+        assert result["text/html"] == "<p>Hi</p>"
+
     def test_real_himalaya_output(self) -> None:
         """Test with realistic himalaya template output."""
         tpl = (
