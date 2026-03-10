@@ -39,6 +39,7 @@ async def list_emails(
             "to": [str(addr) for addr in e.to],
             "subject": e.subject,
             "date": e.date,
+            "has_attachment": e.has_attachment,
         }
         for e in envelopes
     ]

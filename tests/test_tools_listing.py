@@ -17,6 +17,14 @@ class TestListEmails:
             assert result[0]["subject"] == "Test Subject"
             assert result[0]["from"] == "Alice <alice@example.com>"
 
+    async def test_includes_has_attachment(self, sample_envelope_json: str) -> None:
+        data = json.loads(sample_envelope_json)
+        with patch("protonmail_mcp.tools.listing.himalaya") as mock_himalaya:
+            mock_himalaya.run_json = AsyncMock(return_value=data)
+            result = await list_emails()
+            assert result[0]["has_attachment"] is False
+            assert result[1]["has_attachment"] is True
+
     async def test_passes_folder_parameter(self, sample_envelope_json: str) -> None:
         data = json.loads(sample_envelope_json)
         with patch("protonmail_mcp.tools.listing.himalaya") as mock_himalaya:
