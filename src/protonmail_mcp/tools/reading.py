@@ -82,7 +82,7 @@ async def list_attachments(email_id: str, folder: str = "INBOX") -> list[dict[st
         email_id,
         "--folder",
         folder,
-        "--dir",
+        "--downloads-dir",
         tmpdir,
     )
 
@@ -109,7 +109,7 @@ async def _download_to_tmpdir(email_id: str, folder: str, filename: str) -> Path
         email_id,
         "--folder",
         folder,
-        "--dir",
+        "--downloads-dir",
         tmpdir,
     )
     target = Path(tmpdir) / filename
