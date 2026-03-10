@@ -123,7 +123,9 @@ class TestSearchIntegration:
 
 class TestSendIntegration:
     async def test_send_via_client(self, client: Client) -> None:
+        template_json = {"content": "From: me@example.com\nTo: \nSubject: \n\n"}
         with patch("protonmail_mcp.tools.composing.himalaya") as mock_himalaya:
+            mock_himalaya.run_json = AsyncMock(return_value=template_json)
             mock_himalaya.run = AsyncMock(return_value="Message sent")
             result = await client.call_tool(
                 "send",

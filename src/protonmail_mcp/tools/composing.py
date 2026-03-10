@@ -6,20 +6,17 @@ from typing import Any
 from protonmail_mcp.server import himalaya, mcp
 
 
-def _build_template(
-    to: str,
-    subject: str,
-    body: str,
-    cc: str | None = None,
-) -> str:
-    """Build an RFC2822-ish template for himalaya template send."""
-    headers = [
-        f"To: {to}",
-        f"Subject: {subject}",
-    ]
-    if cc:
-        headers.append(f"Cc: {cc}")
-    return "\n".join(headers) + "\n\n" + body
+def _set_subject_in_template(template: str, subject: str) -> str:
+    """Set or replace the Subject header in a template."""
+    return re.sub(r"^Subject:.*$", f"Subject: {subject}", template, count=1, flags=re.MULTILINE)
+
+
+def _set_cc_in_template(template: str, cc: str) -> str:
+    """Add or replace the Cc header in a template."""
+    if re.search(r"^Cc:", template, flags=re.MULTILINE):
+        return re.sub(r"^Cc:.*$", f"Cc: {cc}", template, count=1, flags=re.MULTILINE)
+    # Insert Cc after To header
+    return re.sub(r"^(To:.*$)", rf"\1\nCc: {cc}", template, count=1, flags=re.MULTILINE)
 
 
 def _inject_body_into_template(template: str, body: str) -> str:
@@ -42,6 +39,22 @@ def _set_to_in_template(template: str, to: str) -> str:
     return re.sub(r"^To:.*$", f"To: {to}", template, count=1, flags=re.MULTILINE)
 
 
+def _get_header(template: str, name: str) -> str:
+    """Extract a header value from a template."""
+    match = re.search(rf"^{name}:[ \t]*(.*)$", template, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _ensure_to_from_sender(template: str) -> str:
+    """If To is empty, copy From value to To (handles self-reply case)."""
+    if _get_header(template, "To"):
+        return template
+    from_val = _get_header(template, "From")
+    if from_val:
+        return _set_to_in_template(template, from_val)
+    return template
+
+
 @mcp.tool(annotations={"destructiveHint": False, "title": "Send Email"})
 async def send(
     to: str,
@@ -59,7 +72,14 @@ async def send(
         cc: CC recipients (comma-separated)
         account: Optional account/identity to send from
     """
-    template = _build_template(to=to, subject=subject, body=body, cc=cc)
+    # Get a blank template with From pre-filled from the account
+    result = await himalaya.run_json("template", "write", account=account)
+    template = result["content"]
+    template = _set_to_in_template(template, to)
+    template = _set_subject_in_template(template, subject)
+    if cc:
+        template = _set_cc_in_template(template, cc)
+    template = _inject_body_into_template(template, body)
     await himalaya.run("template", "send", stdin=template, account=account)
     return {"status": "sent", "to": to, "subject": subject}
 
@@ -85,12 +105,16 @@ async def reply(
     reply_args = ["template", "reply", email_id, "--folder", folder]
     if reply_all:
         reply_args.append("--all")
-    template = await himalaya.run(*reply_args, account=account)
+    result = await himalaya.run_json(*reply_args, account=account)
+    template = result["content"]
 
-    # Step 2: Inject our body into the template
+    # Step 2: Ensure To is populated (empty for self-replies)
+    template = _ensure_to_from_sender(template)
+
+    # Step 3: Inject our body into the template
     edited = _inject_body_into_template(template, body)
 
-    # Step 3: Send the edited template
+    # Step 4: Send the edited template
     await himalaya.run("template", "send", stdin=edited, account=account)
     return {"status": "sent", "in_reply_to": email_id}
 
@@ -113,9 +137,10 @@ async def forward(
         account: Optional account/identity to send from
     """
     # Step 1: Get forward template
-    template = await himalaya.run(
+    result = await himalaya.run_json(
         "template", "forward", email_id, "--folder", folder, account=account
     )
+    template = result["content"]
 
     # Step 2: Set the To header and inject body
     edited = _set_to_in_template(template, to)
