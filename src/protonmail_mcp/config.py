@@ -21,4 +21,4 @@ class Settings(BaseSettings):
     # MCP transport (prefixed env vars)
     transport: str = Field(default="stdio", validation_alias="PROTONMAIL_MCP_TRANSPORT")
     host: str = Field(default="0.0.0.0", validation_alias="PROTONMAIL_MCP_HOST")
-    port: int = Field(default=8000, validation_alias="PROTONMAIL_MCP_PORT")
+    port: int = Field(default=10143, validation_alias="PROTONMAIL_MCP_PORT")

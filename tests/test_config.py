@@ -17,7 +17,7 @@ class TestSettings:
         assert settings.notmuch_timeout == 30
         assert settings.transport == "stdio"
         assert settings.host == "0.0.0.0"
-        assert settings.port == 8000
+        assert settings.port == 10143
 
     def test_env_override(self) -> None:
         """Settings should be overridable via environment variables."""
