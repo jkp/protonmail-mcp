@@ -43,7 +43,7 @@ class TestServerToolRegistration:
             "list_emails",
             "list_folders",
             "read_email",
-            "download_attachment",
+            "list_attachments",
             "search",
             "send",
             "reply",

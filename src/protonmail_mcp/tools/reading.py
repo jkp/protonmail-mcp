@@ -1,19 +1,18 @@
 """Read email and download attachment tools."""
 
-import base64
+import mimetypes
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import structlog
+from fastmcp.resources import ResourceContent, ResourceResult
 
 from protonmail_mcp.convert import html_to_markdown
 from protonmail_mcp.server import himalaya, mcp
 from protonmail_mcp.template import parse_template
 
 logger = structlog.get_logger()
-
-_LARGE_ATTACHMENT_THRESHOLD = 10 * 1024 * 1024  # 10MB
 
 
 @mcp.tool(
@@ -58,18 +57,20 @@ async def read_email(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
     annotations={
         "readOnlyHint": True,
         "destructiveHint": False,
-        "title": "Download Attachment",
+        "title": "List Attachments",
     }
 )
-async def download_attachment(email_id: str, folder: str, filename: str) -> dict[str, Any]:
-    """Download an email attachment.
+async def list_attachments(email_id: str, folder: str = "INBOX") -> list[dict[str, Any]]:
+    """List attachments on an email without downloading them.
+
+    Use the returned filenames with the attachment resource:
+    attachment://{folder}/{email_id}/{filename}
 
     Args:
         email_id: The email ID/UID
         folder: The folder containing the email
-        filename: The attachment filename to download
     """
-    logger.info("tool.download_attachment", email_id=email_id, folder=folder, filename=filename)
+    logger.info("tool.list_attachments", email_id=email_id, folder=folder)
     tmpdir = tempfile.mkdtemp()
     await himalaya.run(
         "attachment",
@@ -81,28 +82,56 @@ async def download_attachment(email_id: str, folder: str, filename: str) -> dict
         tmpdir,
     )
 
-    # Find the downloaded file
     downloaded = list(Path(tmpdir).glob("*"))
-    target = None
+    attachments = []
     for f in downloaded:
-        if f.name == filename:
-            target = f
-            break
+        mime_type, _ = mimetypes.guess_type(f.name)
+        attachments.append({
+            "filename": f.name,
+            "size": f.stat().st_size,
+            "mime_type": mime_type or "application/octet-stream",
+        })
 
-    if target is None:
-        logger.warning("tool.download_attachment.not_found", email_id=email_id, filename=filename)
-        return {"error": f"Attachment '{filename}' not found"}
+    logger.info("tool.list_attachments.done", email_id=email_id, count=len(attachments))
+    return attachments
 
-    size = target.stat().st_size
-    result: dict[str, Any] = {
-        "filename": target.name,
-        "size": size,
-        "path": str(target),
-    }
 
-    if size <= _LARGE_ATTACHMENT_THRESHOLD:
-        content = target.read_bytes()
-        result["content_base64"] = base64.b64encode(content).decode()
+async def _download_to_tmpdir(email_id: str, folder: str, filename: str) -> Path:
+    """Download attachments and return path to the requested file."""
+    tmpdir = tempfile.mkdtemp()
+    await himalaya.run(
+        "attachment",
+        "download",
+        email_id,
+        "--folder",
+        folder,
+        "--dir",
+        tmpdir,
+    )
+    target = Path(tmpdir) / filename
+    if not target.exists():
+        raise FileNotFoundError(f"Attachment '{filename}' not found in email {email_id}")
+    return target
 
-    logger.info("tool.download_attachment.done", email_id=email_id, filename=filename, size=size)
-    return result
+
+@mcp.resource("attachment://{folder}/{email_id}/{filename}")
+async def attachment_resource(folder: str, email_id: str, filename: str) -> ResourceResult:
+    """Fetch an email attachment as a binary resource.
+
+    Use list_attachments tool first to discover available filenames.
+    """
+    logger.info("resource.attachment", email_id=email_id, folder=folder, filename=filename)
+    target = await _download_to_tmpdir(email_id, folder, filename)
+    data = target.read_bytes()
+    mime_type, _ = mimetypes.guess_type(filename)
+    mime_type = mime_type or "application/octet-stream"
+    logger.info(
+        "resource.attachment.done",
+        email_id=email_id,
+        filename=filename,
+        size=len(data),
+        mime_type=mime_type,
+    )
+    return ResourceResult(
+        contents=[ResourceContent(content=data, mime_type=mime_type)]
+    )

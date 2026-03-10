@@ -1,8 +1,10 @@
-"""Tests for reading tools (read_email, download_attachment)."""
+"""Tests for reading tools (read_email, list_attachments) and attachment resource."""
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from protonmail_mcp.tools.reading import download_attachment, read_email
+from protonmail_mcp.tools.reading import attachment_resource, list_attachments, read_email
 
 SAMPLE_TEMPLATE_HTML = (
     "From: Alice <alice@example.com>\n"
@@ -71,22 +73,58 @@ class TestReadEmail:
             assert result["cc"] == "d@e.com"
 
 
-class TestDownloadAttachment:
-    async def test_downloads_to_tempdir(self) -> None:
-        with (
-            patch("protonmail_mcp.tools.reading.himalaya") as mock_himalaya,
-            patch("protonmail_mcp.tools.reading.tempfile") as mock_tempfile,
-            patch("protonmail_mcp.tools.reading.Path") as mock_path_cls,
-        ):
-            mock_himalaya.run = AsyncMock(return_value="")
-            mock_tempfile.mkdtemp.return_value = "/tmp/attachments"
-            # Mock the file found in temp dir
-            mock_file = mock_path_cls.return_value / "doc.pdf"
-            mock_path_cls.return_value.glob.return_value = [mock_file]
-            mock_file.name = "doc.pdf"
-            mock_file.stat.return_value.st_size = 1024
-            mock_file.read_bytes.return_value = b"pdf content"
+class TestListAttachments:
+    async def test_lists_attachments_with_metadata(self, tmp_path) -> None:
+        # Create fake downloaded files
+        (tmp_path / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8\xff fake jpeg")
 
-            result = await download_attachment(email_id="42", folder="INBOX", filename="doc.pdf")
-            assert result["filename"] == "doc.pdf"
-            assert result["size"] == 1024
+        with patch("protonmail_mcp.tools.reading.himalaya") as mock_himalaya, patch("protonmail_mcp.tools.reading.tempfile") as mock_tempfile:
+            mock_himalaya.run = AsyncMock(return_value="")
+            mock_tempfile.mkdtemp.return_value = str(tmp_path)
+
+            result = await list_attachments(email_id="42", folder="INBOX")
+            assert len(result) == 2
+            names = {a["filename"] for a in result}
+            assert names == {"report.pdf", "photo.jpg"}
+            for a in result:
+                assert "size" in a
+                assert "mime_type" in a
+            pdf = next(a for a in result if a["filename"] == "report.pdf")
+            assert pdf["mime_type"] == "application/pdf"
+
+    async def test_empty_when_no_attachments(self, tmp_path) -> None:
+        with patch("protonmail_mcp.tools.reading.himalaya") as mock_himalaya, patch("protonmail_mcp.tools.reading.tempfile") as mock_tempfile:
+            mock_himalaya.run = AsyncMock(return_value="")
+            mock_tempfile.mkdtemp.return_value = str(tmp_path)
+
+            result = await list_attachments(email_id="42", folder="INBOX")
+            assert result == []
+
+
+class TestAttachmentResource:
+    async def test_returns_binary_with_mime_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_content = b"%PDF-1.4 test content"
+            Path(tmpdir, "report.pdf").write_bytes(pdf_content)
+
+            with patch("protonmail_mcp.tools.reading.himalaya") as mock_himalaya, patch("protonmail_mcp.tools.reading.tempfile") as mock_tempfile:
+                mock_himalaya.run = AsyncMock(return_value="")
+                mock_tempfile.mkdtemp.return_value = tmpdir
+
+                result = await attachment_resource(folder="INBOX", email_id="42", filename="report.pdf")
+                assert len(result.contents) == 1
+                assert result.contents[0].content == pdf_content
+                assert result.contents[0].mime_type == "application/pdf"
+
+    async def test_raises_on_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("protonmail_mcp.tools.reading.himalaya") as mock_himalaya, patch("protonmail_mcp.tools.reading.tempfile") as mock_tempfile:
+                mock_himalaya.run = AsyncMock(return_value="")
+                mock_tempfile.mkdtemp.return_value = tmpdir
+
+                try:
+                    await attachment_resource(folder="INBOX", email_id="42", filename="nope.pdf")
+                    assert False, "Should have raised"
+                except FileNotFoundError:
+                    pass
