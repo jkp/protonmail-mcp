@@ -53,3 +53,22 @@ class TestSettings:
         assert settings.himalaya_config_path is None
         assert settings.himalaya_account is None
         assert settings.maildir_root is None
+        assert settings.github_client_id is None
+        assert settings.github_client_secret is None
+        assert settings.oauth_base_url is None
+        assert settings.oauth_allowed_users is None
+
+    def test_oauth_env_override(self) -> None:
+        """OAuth settings should be configurable via env vars."""
+        env = {
+            "GITHUB_CLIENT_ID": "test_id",
+            "GITHUB_CLIENT_SECRET": "test_secret",
+            "OAUTH_BASE_URL": "https://example.com",
+            "OAUTH_ALLOWED_USERS": "alice,bob",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings()
+        assert settings.github_client_id == "test_id"
+        assert settings.github_client_secret == "test_secret"
+        assert settings.oauth_base_url == "https://example.com"
+        assert settings.oauth_allowed_users == "alice,bob"

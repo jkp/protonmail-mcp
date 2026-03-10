@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     maildir_root: str | None = None
     notmuch_timeout: int = 30
 
+    # OAuth (GitHub)
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    oauth_base_url: str | None = None
+    oauth_allowed_users: str | None = None  # comma-separated GitHub usernames
+
     # MCP transport (prefixed env vars)
     transport: str = Field(default="stdio", validation_alias="PROTONMAIL_MCP_TRANSPORT")
     host: str = Field(default="0.0.0.0", validation_alias="PROTONMAIL_MCP_HOST")
