@@ -13,7 +13,7 @@ async def archive(email_id: str, folder: str = "INBOX") -> dict[str, Any]:
         email_id: The email ID/UID to archive
         folder: Current folder of the email
     """
-    await himalaya.run("message", "move", email_id, "--folder", folder, "Archive")
+    await himalaya.run("message", "move", "Archive", email_id, "--folder", folder)
     return {"status": "archived", "email_id": email_id}
 
 
@@ -38,7 +38,7 @@ async def move_email(email_id: str, from_folder: str, to_folder: str) -> dict[st
         from_folder: Current folder
         to_folder: Destination folder
     """
-    await himalaya.run("message", "move", email_id, "--folder", from_folder, to_folder)
+    await himalaya.run("message", "move", to_folder, email_id, "--folder", from_folder)
     return {"status": "moved", "email_id": email_id, "to_folder": to_folder}
 
 
