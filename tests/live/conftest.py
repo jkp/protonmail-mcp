@@ -36,6 +36,36 @@ def _himalaya_available() -> bool:
         return False
 
 
+def _smtp_available() -> bool:
+    """Check if himalaya can send via SMTP (Protonmail Bridge SMTP)."""
+    if not shutil.which("himalaya"):
+        return False
+    try:
+        # Try to generate a template — this doesn't actually send
+        result = subprocess.run(
+            ["himalaya", "template", "write"],
+            input=b"To: test@test.invalid\nSubject: smtp-probe\n\nprobe",
+            capture_output=True,
+            timeout=15,
+        )
+        # template write succeeding means at least the template engine works;
+        # actual SMTP is harder to probe without sending. We try a send to
+        # nowhere and check if the error is TLS vs. something else.
+        send_result = subprocess.run(
+            ["himalaya", "template", "send"],
+            input=b"To: test@test.invalid\nSubject: smtp-probe\n\nprobe",
+            capture_output=True,
+            timeout=15,
+        )
+        stderr = send_result.stderr.decode()
+        # If we get a TLS error, SMTP is not available
+        if "tls" in stderr.lower() or "cannot connect to smtp" in stderr.lower():
+            return False
+        return send_result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 def _notmuch_available() -> bool:
     """Check if notmuch is installed and configured."""
     if not shutil.which("notmuch"):
@@ -52,10 +82,12 @@ def _notmuch_available() -> bool:
 
 
 _HIMALAYA_OK = _himalaya_available()
+_SMTP_OK = _smtp_available()
 _NOTMUCH_OK = _notmuch_available()
 
 live = pytest.mark.live
 skip_no_bridge = pytest.mark.skipif(not _HIMALAYA_OK, reason="himalaya/Bridge not available")
+skip_no_smtp = pytest.mark.skipif(not _SMTP_OK, reason="SMTP not available (TLS or Bridge issue)")
 skip_no_notmuch = pytest.mark.skipif(not _NOTMUCH_OK, reason="notmuch not available")
 
 
@@ -94,8 +126,20 @@ async def poll_for_email(
     return None
 
 
-async def _cleanup_test_emails(client: Client, folders: list[str]) -> None:
+@pytest.fixture
+async def live_client():
+    """Function-scoped MCP client for live tests. Resets account after each test."""
+    from protonmail_mcp.server import himalaya
+
+    original_account = himalaya.account
+    async with Client(mcp) as c:
+        yield c
+    himalaya.account = original_account
+
+
+async def cleanup_test_emails(client: Client) -> None:
     """Delete any emails with our test subject prefix + run ID."""
+    folders = ["INBOX", "Sent", "Archive", "Trash"]
     for folder in folders:
         try:
             result = await client.call_tool(
@@ -112,40 +156,3 @@ async def _cleanup_test_emails(client: Client, folders: list[str]) -> None:
                         pass
         except Exception:
             pass
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Session-scoped event loop for async fixtures."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
-async def live_client():
-    """Session-scoped MCP client for live tests."""
-    async with Client(mcp) as c:
-        yield c
-
-
-@pytest.fixture(scope="session")
-async def seed_email(live_client: Client) -> dict[str, Any]:
-    """Send a seed email for read-only tests, cleaned up at session end."""
-    subject = make_subject("seed")
-    await live_client.call_tool(
-        "send",
-        {
-            "to": "jamie@kirkpatrick.email",
-            "subject": subject,
-            "body": "This is a seed email for live integration tests.",
-        },
-    )
-    email = await poll_for_email(live_client, subject)
-    assert email is not None, f"Seed email '{subject}' never arrived"
-    yield email
-
-    # Cleanup all test emails from this run
-    await _cleanup_test_emails(
-        live_client, ["INBOX", "Sent", "Archive", "Trash"]
-    )
