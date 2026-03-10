@@ -71,7 +71,7 @@ class NotmuchSearcher:
         if self.config_path:
             import os
 
-            env = {**os.environ, "NOTMUCH_CONFIG": self.config_path}
+            env = {**os.environ, "NOTMUCH_CONFIG": os.path.expanduser(self.config_path)}
 
         t0 = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
