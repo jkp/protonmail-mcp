@@ -37,32 +37,14 @@ def _himalaya_available() -> bool:
 
 
 def _smtp_available() -> bool:
-    """Check if himalaya can send via SMTP (Protonmail Bridge SMTP)."""
-    if not shutil.which("himalaya"):
-        return False
+    """Check if SMTP is available by testing TCP connectivity to Bridge."""
+    import socket
+
     try:
-        # Try to generate a template — this doesn't actually send
-        result = subprocess.run(
-            ["himalaya", "template", "write"],
-            input=b"To: test@test.invalid\nSubject: smtp-probe\n\nprobe",
-            capture_output=True,
-            timeout=15,
-        )
-        # template write succeeding means at least the template engine works;
-        # actual SMTP is harder to probe without sending. We try a send to
-        # nowhere and check if the error is TLS vs. something else.
-        send_result = subprocess.run(
-            ["himalaya", "template", "send"],
-            input=b"To: test@test.invalid\nSubject: smtp-probe\n\nprobe",
-            capture_output=True,
-            timeout=15,
-        )
-        stderr = send_result.stderr.decode()
-        # If we get a TLS error, SMTP is not available
-        if "tls" in stderr.lower() or "cannot connect to smtp" in stderr.lower():
-            return False
-        return send_result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        sock = socket.create_connection(("127.0.0.1", 1025), timeout=5)
+        sock.close()
+        return True
+    except (OSError, TimeoutError):
         return False
 
 
