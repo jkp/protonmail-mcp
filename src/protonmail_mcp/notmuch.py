@@ -74,9 +74,11 @@ class NotmuchSearcher:
         maildir_root: str = "",
         timeout: int = 30,
     ) -> None:
+        import os
+
         self.bin_path = bin_path
         self.config_path = config_path
-        self.maildir_root = maildir_root
+        self.maildir_root = os.path.expanduser(maildir_root) if maildir_root else ""
         self.timeout = timeout
 
     async def _run(self, *args: str) -> str:
