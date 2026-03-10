@@ -24,7 +24,7 @@ def parse_template(template: str) -> dict[str, str]:
 
     # Parse body parts
     body_parts: dict[str, str] = {}
-    part_pattern = re.compile(r"<#part type=(\S+)>\n(.*?)\n<#/part>", re.DOTALL)
+    part_pattern = re.compile(r"<#part\s+type=([^\s>]+)>\s*\n?(.*?)\n?\s*<#/part>", re.DOTALL)
     for m in part_pattern.finditer(body_block):
         body_parts[m.group(1)] = m.group(2).strip()
 
