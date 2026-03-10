@@ -33,34 +33,37 @@ def _translate_query(query: str) -> str:
     return translated
 
 
-def _build_himalaya_query(subject: str, authors: str) -> str:
-    """Build a himalaya envelope search query from notmuch metadata."""
-    parts = []
-    if subject:
-        # Use first few significant words to avoid query parse issues
-        words = subject.split()[:5]
-        safe_subject = " ".join(w for w in words if not w.startswith("-"))
-        if safe_subject:
-            parts.append(f'subject {safe_subject}')
-    if authors:
-        # Extract email address from "Name <email>" format
-        match = re.search(r"<([^>]+)>", authors)
-        addr = match.group(1) if match else authors.split()[0]
-        parts.append(f"from {addr}")
-    return " and ".join(parts) if parts else ""
+def _extract_from_addr(authors: str) -> str | None:
+    """Extract email address from 'Name <email>' or plain email format."""
+    if not authors:
+        return None
+    match = re.search(r"<([^>]+)>", authors)
+    return match.group(1) if match else authors.split()[0]
 
 
 async def _resolve_uid(folder: str, subject: str, authors: str) -> str | None:
-    """Resolve the correct IMAP UID by searching himalaya for the message."""
-    query = _build_himalaya_query(subject, authors)
-    if not query:
+    """Resolve the correct IMAP UID by searching himalaya for the message.
+
+    Uses from-address query only (Protonmail Bridge IMAP SEARCH doesn't
+    reliably handle combined from+subject queries). Fetches a few candidates
+    and matches by subject in Python.
+    """
+    addr = _extract_from_addr(authors)
+    if not addr:
         return None
+    query = f"from {addr}"
     try:
         envelopes = await himalaya.run_json(
-            "envelope", "list", "--folder", folder, "--page-size", "1", query
+            "envelope", "list", "--folder", folder, "--page-size", "5", query
         )
-        if envelopes and len(envelopes) > 0:
-            return str(envelopes[0]["id"])
+        if not envelopes:
+            return None
+        # Prefer exact subject match
+        for env in envelopes:
+            if env.get("subject") == subject:
+                return str(env["id"])
+        # Fall back to first result from same sender
+        return str(envelopes[0]["id"])
     except Exception:
         logger.debug("search.uid_resolve_failed", folder=folder, query=query)
     return None

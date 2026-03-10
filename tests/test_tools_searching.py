@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 from protonmail_mcp.models import SearchResult
-from protonmail_mcp.tools.searching import _build_himalaya_query, _resolve_uid, _translate_query, search
+from protonmail_mcp.tools.searching import _extract_from_addr, _resolve_uid, _translate_query, search
 
 
 class TestTranslateQuery:
@@ -45,38 +45,35 @@ class TestTranslateQuery:
         assert _translate_query("subject:has:colon") == "subject:has:colon"
 
 
-class TestBuildHimalayaQuery:
-    def test_subject_and_from(self) -> None:
-        assert _build_himalaya_query("Test Subject", "Alice <alice@example.com>") == "subject Test Subject and from alice@example.com"
+class TestExtractFromAddr:
+    def test_angle_bracket_format(self) -> None:
+        assert _extract_from_addr("Alice <alice@example.com>") == "alice@example.com"
 
-    def test_subject_only(self) -> None:
-        assert _build_himalaya_query("Test Subject", "") == "subject Test Subject"
+    def test_plain_email(self) -> None:
+        assert _extract_from_addr("alice@example.com") == "alice@example.com"
 
-    def test_from_only(self) -> None:
-        assert _build_himalaya_query("", "alice@example.com") == "from alice@example.com"
+    def test_empty_returns_none(self) -> None:
+        assert _extract_from_addr("") is None
 
-    def test_empty_both(self) -> None:
-        assert _build_himalaya_query("", "") == ""
-
-    def test_long_subject_truncated(self) -> None:
-        result = _build_himalaya_query("one two three four five six seven", "")
-        assert result == "subject one two three four five"
-
-    def test_subject_strips_dash_words(self) -> None:
-        result = _build_himalaya_query("-negative safe word", "")
-        assert result == "subject safe word"
-
-    def test_from_extracts_email_from_angle_brackets(self) -> None:
-        result = _build_himalaya_query("", "Bob Smith <bob@example.com>")
-        assert "from bob@example.com" in result
+    def test_name_with_spaces(self) -> None:
+        assert _extract_from_addr("Bob Smith <bob@example.com>") == "bob@example.com"
 
 
 class TestResolveUid:
-    async def test_returns_uid_on_match(self) -> None:
+    async def test_prefers_exact_subject_match(self) -> None:
         with patch("protonmail_mcp.tools.searching.himalaya") as mock_himalaya:
-            mock_himalaya.run_json = AsyncMock(return_value=[{"id": "999"}])
+            mock_himalaya.run_json = AsyncMock(return_value=[
+                {"id": "100", "subject": "Other Email"},
+                {"id": "999", "subject": "Test Subject"},
+            ])
             uid = await _resolve_uid("INBOX", "Test Subject", "Alice <alice@example.com>")
             assert uid == "999"
+
+    async def test_falls_back_to_first_result(self) -> None:
+        with patch("protonmail_mcp.tools.searching.himalaya") as mock_himalaya:
+            mock_himalaya.run_json = AsyncMock(return_value=[{"id": "100", "subject": "No Match"}])
+            uid = await _resolve_uid("INBOX", "Test Subject", "Alice <alice@example.com>")
+            assert uid == "100"
 
     async def test_returns_none_on_empty_results(self) -> None:
         with patch("protonmail_mcp.tools.searching.himalaya") as mock_himalaya:
@@ -90,8 +87,8 @@ class TestResolveUid:
             uid = await _resolve_uid("INBOX", "Test", "Alice")
             assert uid is None
 
-    async def test_returns_none_when_no_query(self) -> None:
-        uid = await _resolve_uid("INBOX", "", "")
+    async def test_returns_none_when_no_author(self) -> None:
+        uid = await _resolve_uid("INBOX", "Test", "")
         assert uid is None
 
 
