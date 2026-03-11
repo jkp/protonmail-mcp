@@ -239,6 +239,24 @@ class NotmuchSearcher:
 
         return results
 
+    async def find_message_path(self, message_id: str) -> str | None:
+        """Find the file path for a message by its Message-ID (fast notmuch lookup)."""
+        try:
+            raw = await self._run("show", "--format=json", "--body=false", f"id:{message_id}")
+        except NotmuchError:
+            return None
+        if not raw.strip():
+            return None
+        try:
+            threads = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        msg = _first_matching_message(threads[0]) if threads else None
+        if msg is None:
+            return None
+        filenames = msg.get("filename", [])
+        return filenames[0] if filenames else None
+
     async def count(self, query: str) -> int:
         """Count messages matching a query."""
         raw = await self._run("count", query)

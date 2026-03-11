@@ -16,6 +16,12 @@ logger = structlog.get_logger()
 
 _FLAGS_PATTERN = re.compile(r":2,([A-Z]*)$")
 
+
+def _normalize_message_id(mid: str) -> str:
+    """Normalize a Message-ID by stripping angle brackets and whitespace."""
+    return mid.strip().strip("<>")
+
+
 # Maildir flag characters
 FLAG_SEEN = "S"
 FLAG_REPLIED = "R"
@@ -162,12 +168,14 @@ class MaildirStore:
         """Find the Maildir file for a given Message-ID.
 
         Searches the specified folder, or all folders if not specified.
+        Warning: O(n) scan — slow for large mailboxes. Prefer notmuch lookup.
         """
+        normalized = _normalize_message_id(message_id)
         folders = [folder] if folder else [f.name for f in self.list_folders()]
         for f in folders:
             for path in self._find_message_files(f):
                 msg = self._quick_parse_headers(path)
-                if msg and msg.get("Message-ID", "").strip() == message_id:
+                if msg and _normalize_message_id(msg.get("Message-ID", "")) == normalized:
                     return path
         return None
 
@@ -204,15 +212,14 @@ class MaildirStore:
             return "/".join(parts[:-2])
         return parts[0] if parts else ""
 
-    def read_email(self, message_id: str, folder: str | None = None) -> Email | None:
-        """Read a full email by Message-ID."""
-        path = self._find_file_by_message_id(message_id, folder)
-        if path is None:
-            return None
-
+    def _read_from_path(self, path: Path, message_id: str = "") -> Email | None:
+        """Read a full email from a file path."""
         msg = self._parse_file(path)
         if msg is None:
             return None
+
+        if not message_id:
+            message_id = _normalize_message_id(msg.get("Message-ID", ""))
 
         plain, html_body = _extract_body(msg)
         body_markdown = html_to_markdown(html_body) if html_body else ""
@@ -239,6 +246,20 @@ class MaildirStore:
             flags=flags,
         )
 
+    def read_email_by_path(self, file_path: str, message_id: str = "") -> Email | None:
+        """Read a full email directly from a file path (fast, no scanning)."""
+        path = Path(file_path)
+        if not path.exists():
+            return None
+        return self._read_from_path(path, message_id)
+
+    def read_email(self, message_id: str, folder: str | None = None) -> Email | None:
+        """Read a full email by Message-ID (slow scan fallback)."""
+        path = self._find_file_by_message_id(message_id, folder)
+        if path is None:
+            return None
+        return self._read_from_path(path, message_id)
+
     def list_emails(self, folder: str = "INBOX", limit: int = 20, offset: int = 0) -> list[Email]:
         """List email summaries in a folder (headers only, no body parsing)."""
         files = self._find_message_files(folder)
@@ -251,7 +272,7 @@ class MaildirStore:
             msg = self._quick_parse_headers(path)
             if msg is None:
                 continue
-            mid = msg.get("Message-ID", "").strip()
+            mid = _normalize_message_id(msg.get("Message-ID", ""))
             date, date_str = _parse_date(msg)
             flags = _get_flags(path)
             detected_folder = self._folder_from_path(path)
@@ -315,6 +336,17 @@ class MaildirStore:
         _set_flags(path, existing.replace(flag, ""))
         return True
 
+    def _get_attachment_from_msg(
+        self, msg: email.message.EmailMessage, filename: str
+    ) -> tuple[bytes, str] | None:
+        """Extract attachment content from a parsed message."""
+        for part in msg.walk():
+            if part.get_filename() == filename:
+                payload = part.get_payload(decode=True)
+                if payload is not None:
+                    return payload, part.get_content_type()
+        return None
+
     def get_attachment_content(
         self, message_id: str, filename: str, folder: str | None = None
     ) -> tuple[bytes, str] | None:
@@ -322,17 +354,19 @@ class MaildirStore:
         path = self._find_file_by_message_id(message_id, folder)
         if path is None:
             return None
-
         msg = self._parse_file(path)
         if msg is None:
             return None
+        return self._get_attachment_from_msg(msg, filename)
 
-        for part in msg.walk():
-            if part.get_filename() == filename:
-                payload = part.get_payload(decode=True)
-                if payload is not None:
-                    return payload, part.get_content_type()
-        return None
+    def get_attachment_content_by_path(
+        self, file_path: str, filename: str
+    ) -> tuple[bytes, str] | None:
+        """Get attachment content from a file path (fast, no scanning)."""
+        msg = self._parse_file(Path(file_path))
+        if msg is None:
+            return None
+        return self._get_attachment_from_msg(msg, filename)
 
     def save_message(self, folder: str, raw_bytes: bytes) -> Path:
         """Save a raw email message to a Maildir folder."""

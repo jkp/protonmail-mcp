@@ -1,5 +1,6 @@
 """Composing tools: send, reply, forward using stdlib email + aiosmtplib."""
 
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -8,6 +9,7 @@ from email_mcp.composer import build_forward, build_new, build_reply
 from email_mcp.models import Address
 from email_mcp.sender import SmtpSender
 from email_mcp.server import mcp, settings, store
+from email_mcp.tools.searching import _searcher
 
 logger = structlog.get_logger()
 
@@ -22,6 +24,17 @@ _sender = SmtpSender(
 
 def _from_address() -> Address:
     return Address(name=settings.from_name, addr=settings.from_address)
+
+
+async def _find_original(message_id: str, folder: str | None = None) -> Path | None:
+    """Find the file path for a message, using notmuch fast path first."""
+    path_str = await _searcher.find_message_path(message_id)
+    if path_str:
+        p = Path(path_str)
+        if p.exists():
+            return p
+    # Slow fallback
+    return store._find_file_by_message_id(message_id, folder)
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Send Email"})
@@ -63,8 +76,7 @@ async def reply(
     """
     logger.info("tool.reply", message_id=message_id, reply_all=reply_all)
 
-    # Find and parse the original message
-    path = store._find_file_by_message_id(message_id, folder)
+    path = await _find_original(message_id, folder)
     if path is None:
         return {"error": f"Email not found: {message_id}"}
 
@@ -95,7 +107,7 @@ async def forward(
     """
     logger.info("tool.forward", message_id=message_id, to=to)
 
-    path = store._find_file_by_message_id(message_id, folder)
+    path = await _find_original(message_id, folder)
     if path is None:
         return {"error": f"Email not found: {message_id}"}
 

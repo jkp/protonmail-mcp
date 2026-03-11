@@ -7,7 +7,9 @@ from typing import Any
 import structlog
 from fastmcp.utilities.types import Image
 
+from email_mcp.models import Email
 from email_mcp.server import mcp, store
+from email_mcp.tools.searching import _searcher
 
 logger = structlog.get_logger()
 
@@ -15,6 +17,19 @@ _TEXT_EXTENSIONS = {
     ".txt", ".csv", ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml", ".log",
 }
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+async def _resolve_email(message_id: str, folder: str | None = None) -> Email | None:
+    """Resolve a message_id to an Email, using notmuch for fast path lookup."""
+    # Fast path: use notmuch to find the file
+    path = await _searcher.find_message_path(message_id)
+    if path:
+        email = store.read_email_by_path(path, message_id)
+        if email is not None:
+            return email
+
+    # Slow fallback: scan Maildir by Message-ID header
+    return store.read_email(message_id, folder=folder)
 
 
 @mcp.tool(
@@ -28,7 +43,7 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
         folder: Optional folder hint to speed up lookup
     """
     logger.info("tool.read_email", message_id=message_id, folder=folder)
-    email = store.read_email(message_id, folder=folder)
+    email = await _resolve_email(message_id, folder)
     if email is None:
         return {"error": f"Email not found: {message_id}"}
 
@@ -68,7 +83,7 @@ async def list_attachments(message_id: str, folder: str | None = None) -> list[d
         folder: Optional folder hint
     """
     logger.info("tool.list_attachments", message_id=message_id, folder=folder)
-    email = store.read_email(message_id, folder=folder)
+    email = await _resolve_email(message_id, folder)
     if email is None:
         return []
 
@@ -105,7 +120,14 @@ async def download_attachment(
         folder: Optional folder hint
     """
     logger.info("tool.download_attachment", message_id=message_id, filename=filename)
-    result = store.get_attachment_content(message_id, filename, folder=folder)
+
+    # Use notmuch to find file path, then get attachment from store
+    path = await _searcher.find_message_path(message_id)
+    if path:
+        result = store.get_attachment_content_by_path(path, filename)
+    else:
+        result = store.get_attachment_content(message_id, filename, folder=folder)
+
     if result is None:
         return [f"Attachment '{filename}' not found"]
 
