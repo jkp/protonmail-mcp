@@ -1,7 +1,7 @@
 [project]
-name = "protonmail-mcp"
+name = "email-mcp"
 version = "0.1.0"
-description = "MCP server for ProtonMail via Himalaya CLI and notmuch search"
+description = "Maildir-native MCP server for email with full-text search"
 readme = "README.md"
 authors = [
     { name = "Jamie Kirkpatrick", email = "jkp@kirkconsulting.co.uk" }
@@ -13,10 +13,12 @@ dependencies = [
     "pydantic-settings>=2.0",
     "structlog>=24.0",
     "html2text>=2024.2.26",
+    "luqum>=1.0.0",
+    "aiosmtplib>=3.0",
 ]
 
 [project.scripts]
-protonmail-mcp = "protonmail_mcp.server:main"
+email-mcp = "email_mcp.server:main"
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]
@@ -29,11 +31,15 @@ dev = [
     "pytest-cov>=6.0",
     "mypy>=1.0",
     "ruff>=0.9",
+    "pytest-timeout>=2.3",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: tests that require a running mail server",
+]
 
 [tool.ruff]
 target-version = "py313"
