@@ -19,6 +19,7 @@ _sender = SmtpSender(
     username=settings.smtp_username,
     password=settings.smtp_password,
     start_tls=settings.smtp_starttls,
+    cert_path=settings.smtp_cert_path,
 )
 
 
@@ -37,12 +38,20 @@ async def _find_original(message_id: str, folder: str | None = None) -> Path | N
     return store._find_file_by_message_id(message_id, folder)
 
 
+def _resolve_from(from_address: str | None = None) -> Address:
+    """Resolve the sender address, using override or default."""
+    if from_address:
+        return Address(name=settings.from_name, addr=from_address)
+    return _from_address()
+
+
 @mcp.tool(annotations={"destructiveHint": False, "title": "Send Email"})
 async def send(
     to: str,
     subject: str,
     body: str,
     cc: str | None = None,
+    from_address: str | None = None,
 ) -> dict[str, Any]:
     """Send a new email.
 
@@ -51,9 +60,11 @@ async def send(
         subject: Email subject
         body: Email body text
         cc: CC recipients (comma-separated)
+        from_address: Sender email address (defaults to configured from_address)
     """
-    logger.info("tool.send", to=to, subject=subject, cc=cc)
-    msg = build_new(_from_address(), to, subject, body, cc)
+    sender = _resolve_from(from_address)
+    logger.info("tool.send", to=to, subject=subject, cc=cc, from_=sender.addr)
+    msg = build_new(sender, to, subject, body, cc)
     await _sender.send_and_save(msg, settings.maildir_path)
     logger.info("tool.send.done", to=to, subject=subject)
     return {"status": "sent", "to": to, "subject": subject}
@@ -65,6 +76,7 @@ async def reply(
     body: str,
     folder: str | None = None,
     reply_all: bool = False,
+    from_address: str | None = None,
 ) -> dict[str, Any]:
     """Reply to an email.
 
@@ -73,8 +85,10 @@ async def reply(
         body: Reply body text
         folder: Optional folder hint
         reply_all: Whether to reply to all recipients
+        from_address: Sender email address (defaults to configured from_address)
     """
-    logger.info("tool.reply", message_id=message_id, reply_all=reply_all)
+    sender = _resolve_from(from_address)
+    logger.info("tool.reply", message_id=message_id, reply_all=reply_all, from_=sender.addr)
 
     path = await _find_original(message_id, folder)
     if path is None:
@@ -84,7 +98,7 @@ async def reply(
     if original is None:
         return {"error": f"Could not parse email: {message_id}"}
 
-    msg = build_reply(original, body, _from_address(), reply_all)
+    msg = build_reply(original, body, sender, reply_all)
     await _sender.send_and_save(msg, settings.maildir_path)
     logger.info("tool.reply.done", message_id=message_id)
     return {"status": "sent", "in_reply_to": message_id}
@@ -96,6 +110,7 @@ async def forward(
     to: str,
     body: str,
     folder: str | None = None,
+    from_address: str | None = None,
 ) -> dict[str, Any]:
     """Forward an email to another recipient.
 
@@ -104,8 +119,10 @@ async def forward(
         to: Recipient email address
         body: Additional body text to prepend
         folder: Optional folder hint
+        from_address: Sender email address (defaults to configured from_address)
     """
-    logger.info("tool.forward", message_id=message_id, to=to)
+    sender = _resolve_from(from_address)
+    logger.info("tool.forward", message_id=message_id, to=to, from_=sender.addr)
 
     path = await _find_original(message_id, folder)
     if path is None:
@@ -115,7 +132,7 @@ async def forward(
     if original is None:
         return {"error": f"Could not parse email: {message_id}"}
 
-    msg = build_forward(original, to, body, _from_address())
+    msg = build_forward(original, to, body, sender)
     await _sender.send_and_save(msg, settings.maildir_path)
     logger.info("tool.forward.done", message_id=message_id, to=to)
     return {"status": "sent", "forwarded_to": to, "original_id": message_id}

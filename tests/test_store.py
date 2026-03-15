@@ -249,6 +249,44 @@ class TestGetAttachmentContent:
         assert result is None
 
 
+class TestOptimisticMove:
+    def test_success(self, store):
+        result = store.optimistic_move("<msg1@example.com>", "Archive", "INBOX")
+        assert result is True
+        assert store.read_email("<msg1@example.com>", folder="Archive") is not None
+
+    def test_returns_false_on_not_found(self, store):
+        result = store.optimistic_move("<nonexistent@example.com>", "Archive")
+        assert result is False
+
+    def test_no_exception_on_missing_file(self, store):
+        # This should not raise even if underlying file is gone
+        result = store.optimistic_move("<ghost@example.com>", "Archive")
+        assert result is False
+
+
+class TestFindFileAcrossFolders:
+    def test_finds_in_inbox(self, store):
+        path = store.find_file_across_folders("<msg1@example.com>")
+        assert path is not None
+        assert "INBOX" in str(path)
+
+    def test_finds_in_sent(self, store):
+        path = store.find_file_across_folders("<sent1@example.com>")
+        assert path is not None
+        assert "Sent" in str(path)
+
+    def test_not_found(self, store):
+        path = store.find_file_across_folders("<nonexistent@example.com>")
+        assert path is None
+
+    def test_finds_after_move(self, store):
+        store.move_email("<msg1@example.com>", "Archive", "INBOX")
+        path = store.find_file_across_folders("<msg1@example.com>")
+        assert path is not None
+        assert "Archive" in str(path)
+
+
 class TestSaveMessage:
     def test_saves_to_folder(self, store, maildir):
         raw = b"From: test@example.com\r\nTo: bob@example.com\r\nSubject: Saved\r\n\r\nBody"

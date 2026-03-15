@@ -297,10 +297,30 @@ class MaildirStore:
 
         dest_dir = self.root / to_folder / "cur"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / path.name
+        # Strip UID from filename to avoid mbsync conflicts
+        dest_name = re.sub(r",U=\d+", "", path.name)
+        dest_path = dest_dir / dest_name
         path.rename(dest_path)
         logger.info("store.moved", message_id=message_id, to_folder=to_folder)
         return True
+
+    def optimistic_move(
+        self, message_id: str, to_folder: str, from_folder: str | None = None
+    ) -> bool:
+        """Move an email optimistically. Returns False instead of raising on failure."""
+        try:
+            return self.move_email(message_id, to_folder, from_folder)
+        except (FileNotFoundError, OSError):
+            logger.debug(
+                "store.optimistic_move_failed",
+                message_id=message_id,
+                to_folder=to_folder,
+            )
+            return False
+
+    def find_file_across_folders(self, message_id: str) -> Path | None:
+        """Find a message file across all folders by Message-ID."""
+        return self._find_file_by_message_id(message_id, folder=None)
 
     def delete_email(self, message_id: str, folder: str | None = None) -> bool:
         """Move an email to Trash."""

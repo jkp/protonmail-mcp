@@ -20,7 +20,10 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 async def _resolve_email(message_id: str, folder: str | None = None) -> Email | None:
-    """Resolve a message_id to an Email, using notmuch for fast path lookup."""
+    """Resolve a message_id to an Email, using notmuch for fast path lookup.
+
+    Falls back to scanning Maildir folders if notmuch path is stale.
+    """
     # Fast path: use notmuch to find the file
     path = await _searcher.find_message_path(message_id)
     if path:
@@ -28,8 +31,20 @@ async def _resolve_email(message_id: str, folder: str | None = None) -> Email | 
         if email is not None:
             return email
 
-    # Slow fallback: scan Maildir by Message-ID header
-    return store.read_email(message_id, folder=folder)
+    # Stale path fallback: scan all folders for the Message-ID
+    found = store.find_file_across_folders(message_id)
+    if found:
+        email = store.read_email_by_path(str(found), message_id)
+        if email is not None:
+            return email
+
+    # Slow fallback: scan Maildir by folder hint
+    if folder:
+        email = store.read_email(message_id, folder=folder)
+        if email is not None:
+            return email
+
+    return None
 
 
 @mcp.tool(
@@ -45,7 +60,11 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
     logger.info("tool.read_email", message_id=message_id, folder=folder)
     email = await _resolve_email(message_id, folder)
     if email is None:
-        return {"error": f"Email not found: {message_id}"}
+        return {
+            "error": "not_found_locally",
+            "message_id": message_id,
+            "detail": "This email may have been recently moved. Try again in ~60s.",
+        }
 
     body = email.body_html if email.body_html else email.body_plain
 

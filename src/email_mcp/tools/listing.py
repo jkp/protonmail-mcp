@@ -17,7 +17,11 @@ async def list_emails(
     limit: int = 20,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """List email summaries from a folder.
+    """List email summaries from a folder, sorted newest first.
+
+    Use this to browse a folder (INBOX, Sent, Archive, etc.) without searching.
+    Faster than search — reads directly from Maildir, no indexing needed.
+    Use search() only when you need full-text or filtered queries.
 
     Args:
         folder: Mail folder to list (default: INBOX)

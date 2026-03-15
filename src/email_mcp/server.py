@@ -1,5 +1,8 @@
 """FastMCP server instance and entry point."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import structlog
 from fastmcp import FastMCP
 
@@ -11,6 +14,114 @@ settings = Settings()
 configure_logging(settings.log_level)
 
 logger = structlog.get_logger()
+
+
+@asynccontextmanager
+async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
+    """Initialize IMAP mutator, sync engine, IDLE listener on startup."""
+    import email_mcp.tools.managing as managing
+    from email_mcp.idle import IdleListener
+    from email_mcp.imap import ImapMutator
+    from email_mcp.sync import SyncEngine
+    from email_mcp.tools.searching import _searcher
+
+    notmuch_config = settings.maildir_path / ".notmuch" / "config"
+    notmuch_config_str = str(notmuch_config) if notmuch_config.exists() else None
+
+    # 1. Create IMAP mutator (fall back to SMTP cert for Bridge)
+    imap_cert = settings.imap_cert_path or settings.smtp_cert_path
+    imap = ImapMutator(
+        host=settings.imap_host,
+        port=settings.imap_port,
+        username=settings.imap_username,
+        password=settings.imap_password,
+        starttls=settings.imap_starttls,
+        cert_path=imap_cert,
+    )
+
+    # 2. Create sync engine
+    sync_engine = SyncEngine(
+        mbsync_bin=settings.mbsync_bin,
+        notmuch_bin=settings.notmuch_bin,
+        notmuch_config=notmuch_config_str,
+        mbsync_channel=settings.mbsync_channel,
+        reindex_debounce=settings.reindex_debounce,
+    )
+
+    # 3. Set module-level refs for tools
+    managing._imap = imap
+    managing._sync_engine = sync_engine
+    managing._store = store
+    managing._searcher = _searcher
+
+    idle_listener: IdleListener | None = None
+
+    try:
+        # 4. Connect IMAP
+        try:
+            await imap.connect()
+            logger.info("server.imap_connected")
+        except Exception:
+            logger.warning("server.imap_connect_failed", exc_info=True)
+
+        # 5. Startup sync
+        if settings.full_sync_on_startup:
+            logger.info("server.full_sync_on_startup")
+            try:
+                await sync_engine.full_sync_and_rebuild(
+                    maildir_root=str(settings.maildir_path)
+                )
+                logger.info("server.full_sync_on_startup.done")
+            except Exception:
+                logger.warning("server.full_sync_on_startup.failed", exc_info=True)
+        elif settings.sync_on_startup:
+            logger.info("server.startup_sync")
+            try:
+                await sync_engine.sync_inbox()
+                logger.info("server.startup_sync.done")
+            except Exception:
+                logger.warning("server.startup_sync.failed", exc_info=True)
+            # Background reindex
+            sync_engine.request_reindex()
+
+        # 7. Start IDLE listener if enabled
+        if settings.idle_enabled:
+            idle_listener = IdleListener(
+                host=settings.imap_host,
+                port=settings.imap_port,
+                username=settings.imap_username,
+                password=settings.imap_password,
+                starttls=settings.imap_starttls,
+                cert_path=imap_cert,
+                on_change=sync_engine.sync_inbox,
+            )
+            try:
+                await idle_listener.start()
+                logger.info("server.idle_started")
+            except Exception:
+                logger.warning("server.idle_start_failed", exc_info=True)
+                idle_listener = None
+
+        # 8. Start periodic INBOX sync
+        sync_engine.start_inbox_loop(interval=settings.inbox_sync_interval)
+
+        # 9. Schedule nightly full sync
+        if settings.nightly_sync_enabled:
+            sync_engine.schedule_nightly(hour=settings.nightly_sync_hour)
+
+        yield
+
+    finally:
+        # Shutdown
+        if idle_listener:
+            await idle_listener.stop()
+        await sync_engine.stop()
+        await imap.disconnect()
+        managing._imap = None
+        managing._sync_engine = None
+        managing._store = None
+        managing._searcher = None
+        logger.info("server.shutdown")
 
 
 def _build_auth():
@@ -55,6 +166,7 @@ mcp = FastMCP(
     name="Email MCP",
     auth=_build_auth(),
     middleware=_build_middleware(),
+    lifespan=_lifespan,
 )
 
 store = MaildirStore(settings.maildir_path)

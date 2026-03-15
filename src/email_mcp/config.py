@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_starttls: bool = False
+    smtp_cert_path: str = ""
 
     # Identity
     from_name: str = ""
@@ -36,10 +37,28 @@ class Settings(BaseSettings):
     def maildir_path(self) -> Path:
         return self.maildir_root.expanduser()
 
+    # IMAP cert (shared between IMAP mutator and STARTTLS)
+    imap_cert_path: str = ""
+
     # Sync
     sync_interval_seconds: int = 60
     sync_on_startup: bool = True
+    full_sync_on_startup: bool = False
     mbsync_bin: str = "mbsync"
+    mbsync_channel: str = "protonmail"
+
+    # INBOX sync
+    inbox_sync_interval: int = 60
+
+    # Nightly sync
+    nightly_sync_hour: int = 3
+    nightly_sync_enabled: bool = True
+
+    # IMAP IDLE
+    idle_enabled: bool = True
+
+    # Reindex debounce
+    reindex_debounce: int = 60
 
     # Search
     notmuch_bin: str = "notmuch"
@@ -47,7 +66,7 @@ class Settings(BaseSettings):
     # Server
     transport: Literal["stdio", "http"] = "stdio"
     host: str = "0.0.0.0"
-    port: int = 8025
+    port: int = 10143
     log_level: str = "INFO"
 
     # Auth (optional, for HTTP transport)

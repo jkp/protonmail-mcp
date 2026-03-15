@@ -1,9 +1,18 @@
 """Reply, forward, and new message composition using stdlib email."""
 
 import re
+import uuid
+from datetime import UTC, datetime
 from email.message import EmailMessage
+from email.utils import format_datetime
 
 from email_mcp.models import Address
+
+
+def _add_standard_headers(msg: EmailMessage) -> None:
+    """Add Date and Message-ID headers to a composed message."""
+    msg["Date"] = format_datetime(datetime.now(UTC))
+    msg["Message-ID"] = f"<{uuid.uuid4()}@email-mcp>"
 
 
 def _strip_re(subject: str) -> str:
@@ -73,6 +82,7 @@ def build_new(
     msg["Subject"] = subject
     if cc:
         msg["Cc"] = cc
+    _add_standard_headers(msg)
     msg.set_content(body)
     return msg
 
@@ -105,6 +115,7 @@ def build_reply(
     if refs:
         reply["References"] = refs
 
+    _add_standard_headers(reply)
     quoted = _quote_body(original)
     reply.set_content(f"{body}{quoted}")
     return reply
@@ -126,6 +137,7 @@ def build_forward(
     if refs:
         fwd["References"] = refs
 
+    _add_standard_headers(fwd)
     forwarded = _format_forwarded(original)
     fwd.set_content(f"{body}{forwarded}")
 

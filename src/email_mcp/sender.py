@@ -1,5 +1,6 @@
 """Async SMTP sending via aiosmtplib."""
 
+import ssl
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -19,12 +20,19 @@ class SmtpSender:
         username: str = "",
         password: str = "",
         start_tls: bool = False,
+        cert_path: str = "",
     ) -> None:
         self.hostname = hostname
         self.port = port
         self.username = username
         self.password = password
         self.start_tls = start_tls
+        self.tls_context: ssl.SSLContext | None = None
+        if start_tls and cert_path:
+            import os
+
+            ctx = ssl.create_default_context(cafile=os.path.expanduser(cert_path))
+            self.tls_context = ctx
 
     async def send(self, message: EmailMessage) -> None:
         """Send an email message via SMTP."""
@@ -40,6 +48,7 @@ class SmtpSender:
             start_tls=self.start_tls,
             username=self.username or None,
             password=self.password or None,
+            tls_context=self.tls_context,
         )
         logger.info("smtp.sent", to=message.get("To", ""))
 

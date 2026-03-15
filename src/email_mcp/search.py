@@ -123,8 +123,12 @@ class NotmuchSearcher:
         self.maildir_root = os.path.expanduser(maildir_root) if maildir_root else ""
         self.timeout = timeout
 
-    async def _run(self, *args: str) -> str:
-        """Run a notmuch command and return stdout."""
+    async def _run(self, *args: str, allow_partial: bool = False) -> str:
+        """Run a notmuch command and return stdout.
+
+        If allow_partial is True, return stdout even on non-zero exit code
+        (e.g. when notmuch encounters stale files but still produces output).
+        """
         cmd = [self.bin_path, *args]
         log = logger.bind(subcommand=args[0] if args else "")
         log.debug("notmuch.exec", cmd=cmd)
@@ -158,6 +162,14 @@ class NotmuchSearcher:
 
         if proc.returncode != 0:
             stderr_str = stderr_bytes.decode().strip()
+            if allow_partial and stdout_bytes.strip():
+                log.warning(
+                    "notmuch.partial",
+                    returncode=proc.returncode,
+                    stderr=stderr_str,
+                    elapsed_s=round(elapsed, 2),
+                )
+                return stdout_bytes.decode()
             log.error(
                 "notmuch.error",
                 returncode=proc.returncode,
@@ -187,7 +199,7 @@ class NotmuchSearcher:
             args.extend(["--limit", str(offset + 100)])
         args.append(query)
 
-        raw = await self._run(*args)
+        raw = await self._run(*args, allow_partial=True)
         if not raw.strip():
             return []
 
@@ -256,6 +268,42 @@ class NotmuchSearcher:
             return None
         filenames = msg.get("filename", [])
         return filenames[0] if filenames else None
+
+    async def find_thread_messages(self, message_id: str) -> list[dict[str, str]]:
+        """Find all messages in the same thread as the given Message-ID.
+
+        Returns a list of dicts with 'message_id' and 'path' for each message.
+        """
+        try:
+            raw = await self._run(
+                "show", "--format=json", "--body=false",
+                "--entire-thread=true", f"id:{message_id}",
+                allow_partial=True,
+            )
+        except NotmuchError:
+            return []
+        if not raw.strip():
+            return []
+        try:
+            threads = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+        results: list[dict[str, str]] = []
+
+        def _collect(node: list | dict) -> None:  # type: ignore[type-arg]
+            if isinstance(node, dict):
+                mid = node.get("id", "")
+                filenames = node.get("filename", [])
+                if mid and filenames:
+                    results.append({"message_id": mid, "path": filenames[0]})
+            elif isinstance(node, list):
+                for item in node:
+                    _collect(item)
+
+        for thread in threads:
+            _collect(thread)
+        return results
 
     async def count(self, query: str) -> int:
         """Count messages matching a query."""

@@ -1,6 +1,6 @@
 # email-mcp
 
-Maildir-native MCP server for email with full-text search.
+Maildir-native MCP server for email with full-text search and IMAP-first mutations.
 
 ## Quick Start
 
@@ -10,12 +10,13 @@ uv run pytest              # run tests
 uv run email-mcp           # start server (stdio)
 ```
 
-## Architecture
+## Architecture (v3)
 
-- **Maildir** is the source of truth — all read operations use local files
-- **mbsync** syncs IMAP ↔ Maildir bidirectionally
-- **notmuch** provides full-text search + indexing
-- **aiosmtplib** sends email via SMTP
+- **Reads are local** — Maildir files + notmuch index, no network round-trips
+- **Mutations are IMAP-first** — move/archive/delete/flags go directly to IMAP (authoritative)
+- **Optimistic local updates** — after IMAP success, local Maildir is updated immediately
+- **Tiered sync** — INBOX: IDLE + 60s periodic (0.3s). Everything else: nightly
+- **Debounced reindex** — notmuch new runs at most once per 60s after mutations
 - **Message-ID** identifies emails (not IMAP UIDs)
 - **FastMCP** server with 14 tools, stdio or HTTP transport
 
@@ -23,13 +24,15 @@ uv run email-mcp           # start server (stdio)
 
 | Module | Purpose |
 |--------|---------|
-| `server.py` | FastMCP instance, tool imports, entry point |
+| `server.py` | FastMCP instance, lifespan (IMAP/sync/IDLE init), entry point |
 | `config.py` | Pydantic settings from env vars (EMAIL_MCP_ prefix) |
-| `store.py` | Maildir ops: read, list, move, delete, flags |
+| `store.py` | Maildir ops: read, list, move, delete, flags, optimistic_move |
 | `search.py` | notmuch search + luqum Gmail query translation |
+| `imap.py` | IMAP mutator: COPY/STORE/EXPUNGE by Message-ID |
+| `idle.py` | IMAP IDLE listener for real-time INBOX notifications |
+| `sync.py` | SyncEngine: per-folder mbsync, singleton, debounced notmuch, nightly |
 | `composer.py` | Reply/forward/new message construction (stdlib email) |
 | `sender.py` | aiosmtplib SMTP wrapper |
-| `sync.py` | mbsync + notmuch new subprocess management |
 | `convert.py` | HTML → markdown via html2text |
 | `models.py` | Pydantic models (Email, Folder, Attachment, SearchResult, SyncStatus) |
 | `tools/` | Tool implementations (listing, reading, searching, composing, managing) |
@@ -38,7 +41,7 @@ uv run email-mcp           # start server (stdio)
 
 Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
 Store tests run against temporary Maildir fixtures (real files, no mocks).
-SMTP sending is mocked via `unittest.mock`.
+IMAP/SMTP operations are mocked via `unittest.mock`.
 
 ```bash
 uv run pytest -v            # verbose
@@ -49,10 +52,13 @@ uv run pytest --cov         # with coverage
 
 All env vars use `EMAIL_MCP_` prefix:
 - `EMAIL_MCP_IMAP_HOST`, `EMAIL_MCP_IMAP_PORT`, `EMAIL_MCP_IMAP_USERNAME`, `EMAIL_MCP_IMAP_PASSWORD`
+- `EMAIL_MCP_IMAP_STARTTLS`, `EMAIL_MCP_IMAP_CERT_PATH`
 - `EMAIL_MCP_SMTP_HOST`, `EMAIL_MCP_SMTP_PORT`, `EMAIL_MCP_SMTP_USERNAME`, `EMAIL_MCP_SMTP_PASSWORD`
 - `EMAIL_MCP_MAILDIR_ROOT`, `EMAIL_MCP_FROM_NAME`, `EMAIL_MCP_FROM_ADDRESS`
 - `EMAIL_MCP_TRANSPORT` (stdio/http), `EMAIL_MCP_HOST`, `EMAIL_MCP_PORT`
-- `EMAIL_MCP_NOTMUCH_BIN`, `EMAIL_MCP_MBSYNC_BIN`, `EMAIL_MCP_SYNC_INTERVAL_SECONDS`
+- `EMAIL_MCP_NOTMUCH_BIN`, `EMAIL_MCP_MBSYNC_BIN`, `EMAIL_MCP_MBSYNC_CHANNEL`
+- `EMAIL_MCP_INBOX_SYNC_INTERVAL`, `EMAIL_MCP_NIGHTLY_SYNC_HOUR`, `EMAIL_MCP_NIGHTLY_SYNC_ENABLED`
+- `EMAIL_MCP_IDLE_ENABLED`, `EMAIL_MCP_REINDEX_DEBOUNCE`
 
 ## Prerequisites (external)
 

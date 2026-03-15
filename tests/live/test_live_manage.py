@@ -13,7 +13,7 @@ from tests.live.conftest import (
     skip_no_smtp,
 )
 
-pytestmark = [live, skip_no_maildir, pytest.mark.timeout(180)]
+pytestmark = [live, skip_no_maildir, pytest.mark.timeout(600)]
 
 SELF_ADDR = "jamie@kirkpatrick.email"
 
