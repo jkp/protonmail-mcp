@@ -11,7 +11,7 @@ from email_mcp.logging import configure_logging
 from email_mcp.store import MaildirStore
 
 settings = Settings()
-configure_logging(settings.log_level)
+configure_logging(settings.log_level, ntfy_url=settings.ntfy_url, ntfy_topic=settings.ntfy_topic)
 
 logger = structlog.get_logger()
 
