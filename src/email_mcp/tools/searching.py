@@ -12,7 +12,7 @@ logger = structlog.get_logger()
 _notmuch_config = settings.maildir_path / ".notmuch" / "config"
 _searcher = NotmuchSearcher(
     bin_path=settings.notmuch_bin,
-    config_path=str(_notmuch_config) if _notmuch_config.exists() else None,
+    config_path=str(_notmuch_config),
     maildir_root=str(settings.maildir_path),
 )
 

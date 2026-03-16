@@ -16,6 +16,31 @@ configure_logging(settings.log_level)
 logger = structlog.get_logger()
 
 
+def _ensure_notmuch_config(config_path: "Path") -> None:
+    """Generate notmuch config from server settings if it doesn't exist."""
+    from pathlib import Path
+
+    config_path = Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config_text = f"""\
+[database]
+path={settings.maildir_path}
+
+[new]
+tags=unread;inbox
+ignore=.mbsyncstate;.uidvalidity
+
+[search]
+exclude_tags=deleted;spam
+
+[maildir]
+synchronize_flags=true
+"""
+    config_path.write_text(config_text)
+    logger.info("notmuch.config_generated", path=str(config_path))
+
+
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize IMAP mutator, sync engine, IDLE listener on startup."""
@@ -26,7 +51,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     from email_mcp.tools.searching import _searcher
 
     notmuch_config = settings.maildir_path / ".notmuch" / "config"
-    notmuch_config_str = str(notmuch_config) if notmuch_config.exists() else None
+    if not notmuch_config.exists():
+        _ensure_notmuch_config(notmuch_config)
+    notmuch_config_str = str(notmuch_config)
 
     # 1. Create IMAP mutator (fall back to SMTP cert for Bridge)
     imap_cert = settings.imap_cert_path or settings.smtp_cert_path
