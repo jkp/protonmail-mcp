@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     @property
     def maildir_path(self) -> Path:
-        return self.maildir_root.expanduser()
+        return self.maildir_root.expanduser().resolve()
 
     # IMAP cert (shared between IMAP mutator and STARTTLS)
     imap_cert_path: str = ""

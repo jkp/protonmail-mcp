@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastmcp import FastMCP
@@ -16,11 +17,8 @@ configure_logging(settings.log_level, ntfy_url=settings.ntfy_url, ntfy_topic=set
 logger = structlog.get_logger()
 
 
-def _ensure_notmuch_config(config_path: "Path") -> None:
+def _ensure_notmuch_config(config_path: Path) -> None:
     """Generate notmuch config from server settings if it doesn't exist."""
-    from pathlib import Path
-
-    config_path = Path(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     config_text = f"""\
