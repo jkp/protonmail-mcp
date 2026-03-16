@@ -33,6 +33,8 @@ NOTIFICATION_RULES: dict[str, NotifyRule] = {
     "sync.reindex_failed": NotifyRule(priority="high", debounce_s=600, tags="warning"),
     # IDLE degradation — only notify when backoff is significant
     "idle.error": NotifyRule(priority="high", debounce_s=300, tags="warning", min_backoff=60),
+    # Startup success — confirm notifications are working
+    "server.ready": NotifyRule(priority="default", debounce_s=0, tags="white_check_mark"),
     # IMAP mutation failures — per-failure, moderate debounce
     "tool.archive.imap_failed": NotifyRule(priority="default", debounce_s=60, tags="email"),
     "tool.delete.imap_failed": NotifyRule(priority="default", debounce_s=60, tags="email"),

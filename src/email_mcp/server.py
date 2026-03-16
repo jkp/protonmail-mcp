@@ -136,6 +136,8 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         if settings.nightly_sync_enabled:
             sync_engine.schedule_nightly(hour=settings.nightly_sync_hour)
 
+        logger.info("server.ready")
+
         yield
 
     finally:
