@@ -153,6 +153,24 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         logger.info("server.shutdown")
 
 
+def _build_auth_storage(s: Settings):
+    """Build persistent OAuth state storage if oauth_state_dir is configured.
+
+    Returns a FileTreeStore pointed at the configured directory, or None
+    to let FastMCP use its default (ephemeral across container restarts).
+    """
+    if s.oauth_state_dir is None:
+        return None
+
+    from key_value.aio.stores.filetree import FileTreeStore
+
+    state_dir = s.oauth_state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("server.oauth_storage", path=str(state_dir))
+
+    return FileTreeStore(data_directory=state_dir)
+
+
 def _build_auth():
     """Build OAuth auth provider if GitHub credentials are configured."""
     if not settings.github_client_id or not settings.github_client_secret:
@@ -164,6 +182,7 @@ def _build_auth():
         client_id=settings.github_client_id,
         client_secret=settings.github_client_secret,
         base_url=settings.oauth_base_url or f"http://localhost:{settings.port}",
+        client_storage=_build_auth_storage(settings),
     )
 
 

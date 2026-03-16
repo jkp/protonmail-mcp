@@ -78,3 +78,4 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     oauth_base_url: str | None = None
     oauth_allowed_users: str | None = None
+    oauth_state_dir: Path | None = None
