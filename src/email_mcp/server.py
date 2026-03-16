@@ -160,13 +160,23 @@ def _build_auth_storage(s: Settings):
     if s.oauth_state_dir is None:
         return None
 
-    from key_value.aio.stores.filetree import FileTreeStore
+    from key_value.aio.stores.filetree import (
+        FileTreeStore,
+        FileTreeV1CollectionSanitizationStrategy,
+        FileTreeV1KeySanitizationStrategy,
+    )
 
     state_dir = s.oauth_state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     logger.info("server.oauth_storage", path=str(state_dir))
 
-    return FileTreeStore(data_directory=state_dir)
+    return FileTreeStore(
+        data_directory=state_dir,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(state_dir),
+        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(
+            state_dir
+        ),
+    )
 
 
 def _build_auth():

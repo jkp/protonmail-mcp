@@ -63,3 +63,18 @@ class TestBuildAuthStorage:
             from key_value.aio.stores.filetree import FileTreeStore
 
             assert isinstance(storage, FileTreeStore)
+
+    def test_storage_has_key_sanitization(self, tmp_path: Path) -> None:
+        """Keys containing URL slashes must be sanitized, not used as paths."""
+        from email_mcp.server import _build_auth_storage
+
+        state_dir = tmp_path / "oauth-state"
+        with patch.dict(
+            "os.environ",
+            {"EMAIL_MCP_OAUTH_STATE_DIR": str(state_dir)},
+            clear=True,
+        ):
+            s = Settings(_env_file=None)
+            storage = _build_auth_storage(s)
+            assert storage._key_sanitization_strategy is not None
+            assert storage._collection_sanitization_strategy is not None
