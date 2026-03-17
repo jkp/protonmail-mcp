@@ -267,6 +267,10 @@ class SyncEngine:
         finally:
             self._reindex_running = False
 
+    async def _sleep(self, seconds: float) -> None:
+        """Sleep wrapper — overridable for testing."""
+        await asyncio.sleep(seconds)
+
     def start_inbox_loop(self, interval: int | float = 60) -> None:
         """Start a periodic INBOX sync loop."""
 
@@ -276,7 +280,7 @@ class SyncEngine:
                     await self.sync_inbox()
                 except SyncError:
                     pass  # Already logged
-                await asyncio.sleep(interval)
+                await self._sleep(interval)
 
         self._inbox_task = asyncio.create_task(_loop())
 
