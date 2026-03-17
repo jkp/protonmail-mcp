@@ -33,11 +33,26 @@ class TestQueryTranslation:
     def test_filename_becomes_attachment(self):
         assert translate_query("filename:report.pdf") == "attachment:report.pdf"
 
-    def test_newer_than(self):
+    def test_newer_than_days(self):
         assert translate_query("newer_than:7d") == "date:7days.."
 
-    def test_older_than(self):
+    def test_older_than_days(self):
         assert translate_query("older_than:30d") == "date:..30days"
+
+    def test_newer_than_hours(self):
+        assert translate_query("newer_than:12h") == "date:12hours.."
+
+    def test_older_than_hours(self):
+        assert translate_query("older_than:12h") == "date:..12hours"
+
+    def test_newer_than_weeks(self):
+        assert translate_query("newer_than:2w") == "date:2weeks.."
+
+    def test_older_than_months(self):
+        assert translate_query("older_than:3m") == "date:..3months"
+
+    def test_older_than_years(self):
+        assert translate_query("older_than:1y") == "date:..1years"
 
     def test_passthrough_notmuch_native(self):
         assert translate_query("from:alice") == "from:alice"

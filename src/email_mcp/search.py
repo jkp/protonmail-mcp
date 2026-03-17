@@ -33,6 +33,25 @@ _IS_TAG_MAP = {
 }
 
 
+# Gmail duration suffix → notmuch duration unit
+_DURATION_UNITS = {
+    "h": "hours",
+    "d": "days",
+    "w": "weeks",
+    "m": "months",
+    "y": "years",
+}
+
+
+def _gmail_duration_to_notmuch(value: str) -> str | None:
+    """Convert Gmail duration (e.g. '12h', '7d', '2w') to notmuch (e.g. '12hours')."""
+    m = re.match(r"(\d+)([hdwmy])", value)
+    if not m:
+        return None
+    count, unit = m.group(1), m.group(2)
+    return f"{count}{_DURATION_UNITS[unit]}"
+
+
 class _GmailToNotmuch(TreeTransformer):
     """Rewrite Gmail-style search fields to notmuch equivalents."""
 
@@ -63,17 +82,26 @@ class _GmailToNotmuch(TreeTransformer):
                 return
             tag = _IS_TAG_MAP.get(expr.value, expr.value)
             new_node.name = "tag"
-            new_node.expr = Word(tag)
+            replacement = Word(tag)
+            replacement.head = expr.head
+            replacement.tail = expr.tail
+            new_node.expr = replacement
         elif new_node.name == "newer_than" and isinstance(expr, Word):
-            m = re.match(r"(\d+)d", expr.value)
-            if m:
+            notmuch_date = _gmail_duration_to_notmuch(expr.value)
+            if notmuch_date:
                 new_node.name = "date"
-                new_node.expr = Word(f"{m.group(1)}days..")
+                replacement = Word(f"{notmuch_date}..")
+                replacement.head = expr.head
+                replacement.tail = expr.tail
+                new_node.expr = replacement
         elif new_node.name == "older_than" and isinstance(expr, Word):
-            m = re.match(r"(\d+)d", expr.value)
-            if m:
+            notmuch_date = _gmail_duration_to_notmuch(expr.value)
+            if notmuch_date:
                 new_node.name = "date"
-                new_node.expr = Word(f"..{m.group(1)}days")
+                replacement = Word(f"..{notmuch_date}")
+                replacement.head = expr.head
+                replacement.tail = expr.tail
+                new_node.expr = replacement
 
         yield new_node
 
