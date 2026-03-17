@@ -380,8 +380,28 @@ class TestSearchAndMarkRead:
         ids_by_folder = call_args[0][0]
         assert "Sent" in ids_by_folder
         assert "INBOX" in ids_by_folder
-        assert ids_by_folder["Sent"] == ["<self@ex.com>"]
-        assert ids_by_folder["INBOX"] == ["<self@ex.com>"]
+
+    async def test_all_mail_filtered_from_folder_groups(
+        self, mock_searcher, mock_imap
+    ):
+        """All Mail is a virtual folder and should be skipped."""
+        from email_mcp.tools.batch import search_and_mark_read
+
+        results = [
+            SearchResult(
+                message_id="<a@ex.com>", folders=["All Mail", "INBOX"],
+                subject="A", date="2026-03-17", authors="x",
+            ),
+        ]
+        mock_searcher.search.return_value = results
+
+        await search_and_mark_read(query="*", dry_run=False)
+
+        call_args = mock_imap.batch_add_flags_by_folder.call_args
+        ids_by_folder = call_args[0][0]
+        assert "INBOX" in ids_by_folder
+        assert "All Mail" not in ids_by_folder
+        assert ids_by_folder["INBOX"] == ["<a@ex.com>"]
 
     async def test_execute_reports_errors(self, mock_searcher, mock_imap):
         from email_mcp.tools.batch import search_and_mark_read

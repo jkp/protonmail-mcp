@@ -271,9 +271,14 @@ async def _search_to_folder_groups(
     translated = translate_query(query)
     results = await searcher.search(translated)
 
+    # "All Mail" is a virtual folder containing every message — searching it
+    # via IMAP is ~100x slower than real folders. Filter it out; every message
+    # in "All Mail" also exists in a real folder.
+    _SKIP_FOLDERS = {"All Mail"}
+
     ids_by_folder: dict[str, list[str]] = {}
     for r in results:
-        folders = r.folders or ["INBOX"]
+        folders = [f for f in r.folders if f not in _SKIP_FOLDERS] or r.folders or ["INBOX"]
         for folder in folders:
             ids_by_folder.setdefault(folder, []).append(r.message_id)
 
