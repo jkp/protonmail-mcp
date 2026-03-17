@@ -327,6 +327,71 @@ def _dry_run_response(
     }
 
 
+async def _execute_query_batch(
+    tool_name: str,
+    ids_by_folder: dict[str, list[str]],
+    results: list[dict[str, Any]],
+    imap_op: Any,
+    move_target: str | None = None,
+    skip_source_folders: set[str] | None = None,
+) -> dict[str, Any]:
+    """Shared execution path for all query-based batch tools.
+
+    Truncates to batch size, runs the given IMAP operation, applies optimistic
+    local moves (if move_target is set), guards against infinite loops when the
+    batch makes zero progress, and requests a reindex.
+
+    Args:
+        tool_name: Used for structured log keys.
+        ids_by_folder: Folder-grouped message IDs from _search_to_folder_groups.
+        results: Flat result list (same messages, for batch-size tracking).
+        imap_op: Async callable(ids_by_folder) → (succeeded, errors).
+        move_target: If set, apply optimistic local moves to this folder.
+        skip_source_folders: Source folders to exclude before operating
+            (e.g. {"Trash"} for delete, to avoid Trash→Trash COPY).
+    """
+    if skip_source_folders:
+        ids_by_folder = {
+            f: ids for f, ids in ids_by_folder.items()
+            if f not in skip_source_folders
+        }
+
+    if not ids_by_folder:
+        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
+
+    ids_by_folder, results, total = _truncate_to_batch_size(ids_by_folder, results)
+
+    succeeded, errors = await imap_op(ids_by_folder)
+
+    if move_target:
+        local_store = _require_store()
+        failed_ids = {e["message_id"] for e in errors}
+        for r in results:
+            if r["message_id"] not in failed_ids:
+                for folder in r["folders"] or ["INBOX"]:
+                    local_store.optimistic_move(r["message_id"], move_target, folder)
+        _require_sync().request_reindex()
+
+    remaining = total - len(results)
+    # Zero-progress guard: stale notmuch entries that don't exist in IMAP
+    # would loop forever. Stop and let the next sync clean up the index.
+    if succeeded == 0 and errors:
+        remaining = 0
+
+    logger.info(
+        f"tool.{tool_name}.done",
+        succeeded=succeeded,
+        failed=len(errors),
+        remaining=remaining,
+    )
+    return {
+        "succeeded": succeeded,
+        "failed": len(errors),
+        "errors": errors,
+        "remaining": remaining,
+    }
+
+
 @mcp.tool(
     annotations={"destructiveHint": False, "title": "Search and Mark Read"}
 )
@@ -348,7 +413,6 @@ async def search_and_mark_read(
         dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_mark_read", query=query, dry_run=dry_run)
-
     try:
         ids_by_folder, results = await _search_to_folder_groups(query)
     except (NotmuchError, Exception) as e:
@@ -358,34 +422,13 @@ async def search_and_mark_read(
     if dry_run:
         return _dry_run_response(results, ids_by_folder)
 
-    if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
-
-    ids_by_folder, results, total = _truncate_to_batch_size(
-        ids_by_folder, results
-    )
-
     imap = _require_imap()
-    succeeded, errors = await imap.batch_add_flags_by_folder(
-        ids_by_folder, [r"\Seen"]
+    return await _execute_query_batch(
+        "search_and_mark_read",
+        ids_by_folder,
+        results,
+        imap_op=lambda g: imap.batch_add_flags_by_folder(g, [r"\Seen"]),
     )
-
-    remaining = total - len(results)
-    if succeeded == 0 and errors:
-        remaining = 0
-
-    logger.info(
-        "tool.search_and_mark_read.done",
-        succeeded=succeeded,
-        failed=len(errors),
-        remaining=remaining,
-    )
-    return {
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
 
 
 @mcp.tool(
@@ -409,7 +452,6 @@ async def search_and_archive(
         dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_archive", query=query, dry_run=dry_run)
-
     try:
         ids_by_folder, results = await _search_to_folder_groups(query)
     except (NotmuchError, Exception) as e:
@@ -419,43 +461,14 @@ async def search_and_archive(
     if dry_run:
         return _dry_run_response(results, ids_by_folder)
 
-    if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
-
-    ids_by_folder, results, total = _truncate_to_batch_size(
-        ids_by_folder, results
-    )
-
     imap = _require_imap()
-    local_store = _require_store()
-    sync = _require_sync()
-
-    succeeded, errors = await imap.batch_move_by_folder(ids_by_folder, "Archive")
-
-    # Optimistic local moves for succeeded messages
-    failed_ids = {e["message_id"] for e in errors}
-    for r in results:
-        if r["message_id"] not in failed_ids:
-            for folder in r["folders"] or ["INBOX"]:
-                local_store.optimistic_move(r["message_id"], "Archive", folder)
-
-    remaining = total - len(results)
-    if succeeded == 0 and errors:
-        remaining = 0
-
-    sync.request_reindex()
-    logger.info(
-        "tool.search_and_archive.done",
-        succeeded=succeeded,
-        failed=len(errors),
-        remaining=remaining,
+    return await _execute_query_batch(
+        "search_and_archive",
+        ids_by_folder,
+        results,
+        imap_op=lambda g: imap.batch_move_by_folder(g, "Archive"),
+        move_target="Archive",
     )
-    return {
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
 
 
 @mcp.tool(
@@ -479,7 +492,6 @@ async def search_and_delete(
         dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_delete", query=query, dry_run=dry_run)
-
     try:
         ids_by_folder, results = await _search_to_folder_groups(query)
     except (NotmuchError, Exception) as e:
@@ -489,49 +501,16 @@ async def search_and_delete(
     if dry_run:
         return _dry_run_response(results, ids_by_folder)
 
-    # Messages already in Trash are already deleted — skip them to avoid
-    # Trash→Trash COPY which ProtonMail Bridge rejects with Code=2501.
-    ids_by_folder = {f: ids for f, ids in ids_by_folder.items() if f != "Trash"}
-
-    if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
-
-    ids_by_folder, results, total = _truncate_to_batch_size(
-        ids_by_folder, results
-    )
-
     imap = _require_imap()
-    local_store = _require_store()
-    sync = _require_sync()
-
-    succeeded, errors = await imap.batch_move_by_folder(ids_by_folder, "Trash")
-
-    failed_ids = {e["message_id"] for e in errors}
-    for r in results:
-        if r["message_id"] not in failed_ids:
-            for folder in r["folders"] or ["INBOX"]:
-                local_store.optimistic_move(r["message_id"], "Trash", folder)
-
-    remaining = total - len(results)
-
-    # If nothing succeeded, the batch is stuck — stale notmuch entries that
-    # don't exist in IMAP. Stop rather than loop forever.
-    if succeeded == 0 and errors:
-        remaining = 0
-
-    sync.request_reindex()
-    logger.info(
-        "tool.search_and_delete.done",
-        succeeded=succeeded,
-        failed=len(errors),
-        remaining=remaining,
+    return await _execute_query_batch(
+        "search_and_delete",
+        ids_by_folder,
+        results,
+        imap_op=lambda g: imap.batch_move_by_folder(g, "Trash"),
+        move_target="Trash",
+        # Messages already in Trash: Trash→Trash COPY rejected by Bridge (Code=2501)
+        skip_source_folders={"Trash"},
     )
-    return {
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
 
 
 # Interpolate batch size into docstrings so it's defined in one place
