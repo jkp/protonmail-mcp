@@ -256,6 +256,6 @@ def main() -> None:
         maildir_root=str(settings.maildir_path),
     )
     if settings.transport == "http":
-        mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)
+        mcp.run(transport="http", host=settings.host, port=settings.port)
     else:
         mcp.run()
