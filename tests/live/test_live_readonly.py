@@ -3,7 +3,7 @@
 import pytest
 from fastmcp import Client
 
-from tests.live.conftest import _parse_result, live, skip_no_maildir
+from tests.live.conftest import _parse_emails, _parse_result, live, skip_no_maildir
 
 pytestmark = [live, skip_no_maildir, pytest.mark.timeout(120)]
 
@@ -29,14 +29,14 @@ class TestListEmails:
         result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 5}
         )
-        emails = _parse_result(result)
+        emails = _parse_emails(result)
         assert isinstance(emails, list)
 
     async def test_email_has_required_fields(self, live_client: Client) -> None:
         result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 50}
         )
-        emails = _parse_result(result)
+        emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX to validate")
         for email in emails:
@@ -51,7 +51,7 @@ class TestListEmails:
         result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 50}
         )
-        emails = _parse_result(result)
+        emails = _parse_emails(result)
         assert isinstance(emails, list)
 
 
@@ -60,7 +60,7 @@ class TestReadEmail:
         list_result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 5}
         )
-        emails = _parse_result(list_result)
+        emails = _parse_emails(list_result)
         if not emails:
             pytest.skip("No emails in INBOX")
 
@@ -78,7 +78,7 @@ class TestReadEmail:
         result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 20}
         )
-        emails = _parse_result(result)
+        emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX")
 
@@ -100,7 +100,7 @@ class TestReadEmail:
         result = await live_client.call_tool(
             "list_emails", {"folder": "INBOX", "limit": 10}
         )
-        emails = _parse_result(result)
+        emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX")
 

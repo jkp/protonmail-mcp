@@ -371,6 +371,9 @@ async def search_and_mark_read(
     )
 
     remaining = total - len(results)
+    if succeeded == 0 and errors:
+        remaining = 0
+
     logger.info(
         "tool.search_and_mark_read.done",
         succeeded=succeeded,
@@ -437,6 +440,9 @@ async def search_and_archive(
                 local_store.optimistic_move(r["message_id"], "Archive", folder)
 
     remaining = total - len(results)
+    if succeeded == 0 and errors:
+        remaining = 0
+
     sync.request_reindex()
     logger.info(
         "tool.search_and_archive.done",
@@ -483,6 +489,10 @@ async def search_and_delete(
     if dry_run:
         return _dry_run_response(results, ids_by_folder)
 
+    # Messages already in Trash are already deleted — skip them to avoid
+    # Trash→Trash COPY which ProtonMail Bridge rejects with Code=2501.
+    ids_by_folder = {f: ids for f, ids in ids_by_folder.items() if f != "Trash"}
+
     if not ids_by_folder:
         return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
 
@@ -503,6 +513,12 @@ async def search_and_delete(
                 local_store.optimistic_move(r["message_id"], "Trash", folder)
 
     remaining = total - len(results)
+
+    # If nothing succeeded, the batch is stuck — stale notmuch entries that
+    # don't exist in IMAP. Stop rather than loop forever.
+    if succeeded == 0 and errors:
+        remaining = 0
+
     sync.request_reindex()
     logger.info(
         "tool.search_and_delete.done",

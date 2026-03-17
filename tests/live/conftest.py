@@ -93,6 +93,17 @@ def _parse_result(result: Any) -> Any:
     return json.loads(text)
 
 
+def _parse_emails(result: Any) -> list[dict[str, Any]]:
+    """Extract the email list from a list_emails CallToolResult.
+
+    list_emails returns a paginated dict {"emails": [...], "total": N, "count": N}.
+    """
+    data = _parse_result(result)
+    if isinstance(data, dict):
+        return data.get("emails", [])
+    return data
+
+
 def make_subject(test_name: str) -> str:
     """Create a unique, identifiable test email subject."""
     return f"{TEST_SUBJECT_PREFIX} {RUN_ID} {test_name}"
