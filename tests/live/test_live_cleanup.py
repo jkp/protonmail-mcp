@@ -1,15 +1,11 @@
 """Live cleanup: runs last to clean up all test emails via IMAP.
 
-This file is named zz_ so it sorts after all other live tests.
-It exercises the query-based batch tools (search_and_mark_read,
+Exercises the query-based batch tools (search_and_mark_read,
 search_and_delete) while cleaning up [MCP-TEST] emails created
 by earlier tests.
 
-Sequence:
-  1. Sync to ensure notmuch index is fresh
-  2. search_and_mark_read — dry run, then execute
-  3. search_and_delete — dry run, then execute
-  4. Verify nothing remains
+Uses @pytest.mark.order("last") to ensure this runs after all
+other live tests regardless of file naming.
 """
 
 import pytest
@@ -23,7 +19,13 @@ from tests.live.conftest import (
     skip_no_notmuch,
 )
 
-pytestmark = [live, skip_no_maildir, skip_no_notmuch, pytest.mark.timeout(120)]
+pytestmark = [
+    live,
+    skip_no_maildir,
+    skip_no_notmuch,
+    pytest.mark.timeout(120),
+    pytest.mark.order("last"),
+]
 
 # Quote the brackets to avoid luqum parsing them as range syntax
 TEST_QUERY = f'subject:"{TEST_SUBJECT_PREFIX}"'
