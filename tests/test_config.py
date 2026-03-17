@@ -13,20 +13,26 @@ def test_default_settings():
     assert settings.smtp_port == 1025
     assert settings.transport == "stdio"
     assert settings.log_level == "INFO"
-    assert settings.sync_interval_seconds == 60
     assert settings.imap_cert_path == ""
-    assert settings.inbox_sync_interval == 60
-    assert settings.nightly_sync_hour == 3
-    assert settings.nightly_sync_enabled is True
-    assert settings.idle_enabled is True
-    assert settings.reindex_debounce == 60
-    assert settings.mbsync_channel == "protonmail"
+    assert settings.proton_password == ""
 
 
 def test_maildir_path_expands_user():
     settings = Settings(maildir_root=Path("~/test-mail"))
     assert "~" not in str(settings.maildir_path)
     assert str(settings.maildir_path).endswith("test-mail")
+
+
+def test_database_path_expands_user():
+    settings = Settings(db_path=Path("~/test.db"))
+    assert "~" not in str(settings.database_path)
+    assert str(settings.database_path).endswith("test.db")
+
+
+def test_proton_session_path_expands_user():
+    settings = Settings(proton_session_path=Path("~/session.json"))
+    assert "~" not in str(settings.proton_session_file)
+    assert str(settings.proton_session_file).endswith("session.json")
 
 
 def test_env_prefix(monkeypatch):
@@ -39,19 +45,19 @@ def test_env_prefix(monkeypatch):
     assert settings.transport == "http"
 
 
-def test_v3_config_env_overrides(monkeypatch):
+def test_v4_config_env_overrides(monkeypatch):
     monkeypatch.setenv("EMAIL_MCP_IMAP_CERT_PATH", "/tmp/cert.pem")
-    monkeypatch.setenv("EMAIL_MCP_INBOX_SYNC_INTERVAL", "30")
-    monkeypatch.setenv("EMAIL_MCP_NIGHTLY_SYNC_HOUR", "4")
-    monkeypatch.setenv("EMAIL_MCP_NIGHTLY_SYNC_ENABLED", "false")
-    monkeypatch.setenv("EMAIL_MCP_IDLE_ENABLED", "false")
-    monkeypatch.setenv("EMAIL_MCP_REINDEX_DEBOUNCE", "120")
-    monkeypatch.setenv("EMAIL_MCP_MBSYNC_CHANNEL", "mymail")
+    monkeypatch.setenv("EMAIL_MCP_PROTON_PASSWORD", "secret")
     settings = Settings()
     assert settings.imap_cert_path == "/tmp/cert.pem"
-    assert settings.inbox_sync_interval == 30
-    assert settings.nightly_sync_hour == 4
-    assert settings.nightly_sync_enabled is False
-    assert settings.idle_enabled is False
-    assert settings.reindex_debounce == 120
-    assert settings.mbsync_channel == "mymail"
+    assert settings.proton_password == "secret"
+
+
+def test_old_v3_env_vars_ignored(monkeypatch):
+    """Removed v3 env vars are silently ignored (extra='ignore')."""
+    monkeypatch.setenv("EMAIL_MCP_MBSYNC_CHANNEL", "mymail")
+    monkeypatch.setenv("EMAIL_MCP_NIGHTLY_SYNC_ENABLED", "false")
+    monkeypatch.setenv("EMAIL_MCP_IDLE_ENABLED", "false")
+    # Should not raise
+    settings = Settings()
+    assert settings.imap_host == "127.0.0.1"

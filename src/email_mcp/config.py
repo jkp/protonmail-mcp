@@ -11,12 +11,13 @@ class Settings(BaseSettings):
         env_prefix="EMAIL_MCP_", env_file=".env", extra="ignore"
     )
 
-    # IMAP (for mbsync)
+    # Bridge IMAP (for body fetching only — decrypts PGP transparently)
     imap_host: str = "127.0.0.1"
     imap_port: int = 1143
     imap_username: str = ""
     imap_password: str = ""
     imap_starttls: bool = True
+    imap_cert_path: str = ""
 
     # SMTP (for sending)
     smtp_host: str = "127.0.0.1"
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     from_name: str = ""
     from_address: str = ""
 
-    # Maildir
+    # Maildir (kept for composing reply/forward originals via Bridge)
     maildir_root: Path = Path("~/.local/share/email-mcp/mail")
 
     @property
@@ -45,40 +46,15 @@ class Settings(BaseSettings):
         return self.db_path.expanduser().resolve()
 
     # v4 ProtonMail native API
-    # proton_username: same as imap_username (ProtonMail email address)
-    # proton_password: actual ProtonMail account password (for SRP auth, not Bridge app password)
+    # imap_username is the ProtonMail email address (used for both Bridge IMAP and API)
+    # proton_password: actual ProtonMail account password (for SRP auth)
+    # imap_password: Bridge-generated app password (for IMAP body fetching only)
     proton_password: str = ""
     proton_session_path: Path = Path("~/.local/share/email-mcp/proton_session.json")
 
     @property
     def proton_session_file(self) -> Path:
         return self.proton_session_path.expanduser().resolve()
-
-    # IMAP cert (shared between IMAP mutator and STARTTLS)
-    imap_cert_path: str = ""
-
-    # Sync
-    sync_interval_seconds: int = 60
-    sync_on_startup: bool = True
-    full_sync_on_startup: bool = False
-    mbsync_bin: str = "mbsync"
-    mbsync_channel: str = "protonmail"
-
-    # INBOX sync
-    inbox_sync_interval: int = 60
-
-    # Nightly sync
-    nightly_sync_hour: int = 3
-    nightly_sync_enabled: bool = True
-
-    # IMAP IDLE
-    idle_enabled: bool = True
-
-    # Reindex debounce
-    reindex_debounce: int = 60
-
-    # Search
-    notmuch_bin: str = "notmuch"
 
     # NTFY push notifications (empty URL = disabled)
     ntfy_url: str = ""
