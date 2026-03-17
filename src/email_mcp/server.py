@@ -187,6 +187,29 @@ def _build_auth_storage(s: Settings):
     )
 
 
+def _cached_verify_token(provider, ttl: int = 300):
+    """Wrap a provider's verify_token with a TTL cache."""
+    import time
+
+    cache: dict[str, tuple[float, object]] = {}
+    original = provider.verify_token.__func__  # unbound method
+
+    async def cached(self, token: str):
+        now = time.monotonic()
+        if token in cache:
+            cached_at, result = cache[token]
+            if now - cached_at < ttl:
+                return result
+        result = await original(self, token)
+        if result is not None:
+            cache[token] = (now, result)
+        return result
+
+    import types
+
+    provider.verify_token = types.MethodType(cached, provider)
+
+
 def _build_auth():
     """Build OAuth auth provider if GitHub credentials are configured."""
     if not settings.github_client_id or not settings.github_client_secret:
@@ -194,12 +217,15 @@ def _build_auth():
 
     from fastmcp.server.auth.providers.github import GitHubProvider
 
-    return GitHubProvider(
+    provider = GitHubProvider(
         client_id=settings.github_client_id,
         client_secret=settings.github_client_secret,
         base_url=settings.oauth_base_url or f"http://localhost:{settings.port}",
         client_storage=_build_auth_storage(settings),
     )
+    # Cache token verification for 5 minutes to avoid GitHub API calls on every request
+    _cached_verify_token(provider, ttl=300)
+    return provider
 
 
 def _build_middleware():
