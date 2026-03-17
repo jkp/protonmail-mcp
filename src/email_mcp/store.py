@@ -261,6 +261,10 @@ class MaildirStore:
             return None
         return self._read_from_path(path, message_id)
 
+    def count_emails(self, folder: str = "INBOX") -> int:
+        """Count total messages in a folder (fast, no parsing)."""
+        return len(self._find_message_files(folder))
+
     def list_emails(self, folder: str = "INBOX", limit: int = 20, offset: int = 0) -> list[Email]:
         """List email summaries in a folder (headers only, no body parsing)."""
         files = self._find_message_files(folder)
