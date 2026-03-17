@@ -219,6 +219,60 @@ class ImapMutator:
             self._remove_flags_sync, message_id, flag_list, folder
         )
 
+    # ── Body fetch (v4 body indexer) ──────────────────────────────────
+
+    def _fetch_body_sync(self, message_id: str, folder: str | None = None) -> str:
+        """Fetch decrypted body text for a single message (sync)."""
+        assert self._client is not None
+        imap_folder, uid = self._find_uid_sync(message_id, folder)
+        self._client.select_folder(imap_folder, readonly=True)
+        response = self._client.fetch([uid], ["BODY[TEXT]"])
+        raw = response.get(uid, {}).get(b"BODY[TEXT]", b"")
+        return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+
+    async def fetch_body(self, message_id: str, folder: str | None = None) -> str:
+        """Fetch decrypted body for a message by RFC 2822 Message-ID."""
+        await self._ensure_connected()
+        return await asyncio.to_thread(self._fetch_body_sync, message_id, folder)
+
+    def _fetch_bodies_in_folder_sync(self, folder: str) -> dict[str, str]:
+        """Bulk-fetch all message bodies in a folder (sync).
+
+        Returns {message_id: body_text} for every message in the folder.
+        Used for initial indexing — one IMAP command per chunk of 200 messages.
+        """
+        assert self._client is not None
+        self._client.select_folder(folder, readonly=True)
+        all_uids = self._client.search(["ALL"])
+        result: dict[str, str] = {}
+
+        for i in range(0, len(all_uids), 200):
+            chunk = all_uids[i : i + 200]
+            response = self._client.fetch(
+                chunk,
+                ["BODY[HEADER.FIELDS (MESSAGE-ID)]", "BODY[TEXT]"],
+            )
+            for uid, data in response.items():
+                raw_header = data.get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]", b"")
+                header_str = raw_header.decode("utf-8", errors="replace") if isinstance(raw_header, bytes) else str(raw_header)
+                mid = ""
+                for line in header_str.splitlines():
+                    if line.lower().startswith("message-id:"):
+                        mid = line.split(":", 1)[1].strip()
+                        break
+                if not mid:
+                    continue
+                raw_body = data.get(b"BODY[TEXT]", b"")
+                body = raw_body.decode("utf-8", errors="replace") if isinstance(raw_body, bytes) else str(raw_body)
+                result[mid] = body
+
+        return result
+
+    async def fetch_bodies_in_folder(self, folder: str) -> dict[str, str]:
+        """Bulk-fetch all bodies in a folder. Returns {message_id: body}."""
+        await self._ensure_connected()
+        return await asyncio.to_thread(self._fetch_bodies_in_folder_sync, folder)
+
     # ── Batch operations ──────────────────────────────────────────────
 
     def _batch_find_uids_sync(
