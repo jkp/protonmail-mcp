@@ -42,6 +42,7 @@ synchronize_flags=true
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize IMAP mutator, sync engine, IDLE listener on startup."""
+    import email_mcp.tools.batch as batch
     import email_mcp.tools.managing as managing
     from email_mcp.idle import IdleListener
     from email_mcp.imap import ImapMutator
@@ -78,6 +79,10 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     managing._sync_engine = sync_engine
     managing._store = store
     managing._searcher = _searcher
+
+    batch._imap = imap
+    batch._sync_engine = sync_engine
+    batch._store = store
 
     idle_listener: IdleListener | None = None
 
@@ -148,6 +153,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         managing._sync_engine = None
         managing._store = None
         managing._searcher = None
+        batch._imap = None
+        batch._sync_engine = None
+        batch._store = None
         logger.info("server.shutdown")
 
 
@@ -228,6 +236,7 @@ mcp = FastMCP(
 store = MaildirStore(settings.maildir_path)
 
 # Import tools to register them with the mcp instance
+import email_mcp.tools.batch  # noqa: F401, E402
 import email_mcp.tools.composing  # noqa: F401, E402
 import email_mcp.tools.listing  # noqa: F401, E402
 import email_mcp.tools.managing  # noqa: F401, E402

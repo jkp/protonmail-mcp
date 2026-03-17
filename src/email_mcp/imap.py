@@ -217,3 +217,200 @@ class ImapMutator:
         await asyncio.to_thread(
             self._remove_flags_sync, message_id, flag_list, folder
         )
+
+    # ── Batch operations ──────────────────────────────────────────────
+
+    def _batch_find_uids_sync(
+        self, message_ids: list[str], folder: str | None = None
+    ) -> tuple[dict[str, list[tuple[str, int]]], list[dict]]:
+        """Find UIDs for multiple messages, grouped by folder.
+
+        Returns:
+            (uids_by_folder, errors) where uids_by_folder is
+            {folder: [(message_id, uid), ...]} and errors is
+            [{"message_id": ..., "detail": ...}, ...]
+        """
+        assert self._client is not None
+        uids_by_folder: dict[str, list[tuple[str, int]]] = {}
+        errors: list[dict] = []
+
+        if folder:
+            folders = [folder]
+        else:
+            folders = ["INBOX"]
+            for _flags, _delimiter, name in self._client.list_folders():
+                name_str = name if isinstance(name, str) else name.decode()
+                if name_str not in folders:
+                    folders.append(name_str)
+
+        # Build criteria for all messages upfront
+        remaining: dict[str, bytes] = {}
+        for message_id in message_ids:
+            normalized = message_id.strip().strip("<>")
+            remaining[message_id] = f"<{normalized}>".encode()
+
+        # Iterate folders in outer loop: O(F) SELECTs instead of O(N*F)
+        for f in folders:
+            if not remaining:
+                break
+            self._client.select_folder(f, readonly=True)
+            for message_id, encoded_id in list(remaining.items()):
+                criteria = [b"HEADER", b"Message-ID", encoded_id]
+                uids = self._client.search(criteria)
+                if uids:
+                    uids_by_folder.setdefault(f, []).append(
+                        (message_id, uids[0])
+                    )
+                    del remaining[message_id]
+
+        for message_id in remaining:
+            errors.append(
+                {"message_id": message_id, "detail": "Message not found"}
+            )
+
+        return uids_by_folder, errors
+
+    async def _batch_find_uids(
+        self, message_ids: list[str], folder: str | None = None
+    ) -> dict[str, list[tuple[str, int]]]:
+        """Find UIDs for multiple messages, grouped by folder.
+
+        Raises ImapError if any message is not found.
+        """
+        await self._ensure_connected()
+        uids_by_folder, errors = await asyncio.to_thread(
+            self._batch_find_uids_sync, message_ids, folder
+        )
+        if errors:
+            raise ImapError(
+                f"Messages not found: {[e['message_id'] for e in errors]}"
+            )
+        return uids_by_folder
+
+    async def _batch_find_uids_with_errors(
+        self, message_ids: list[str], folder: str | None = None
+    ) -> tuple[dict[str, list[tuple[str, int]]], list[dict]]:
+        """Find UIDs for multiple messages, returning errors instead of raising."""
+        await self._ensure_connected()
+        return await asyncio.to_thread(
+            self._batch_find_uids_sync, message_ids, folder
+        )
+
+    def _batch_move_sync(
+        self,
+        uids_by_folder: dict[str, list[tuple[str, int]]],
+        to_folder: str,
+    ) -> tuple[int, list[dict]]:
+        """Batch COPY+DELETE+EXPUNGE per folder.
+
+        Returns (succeeded_count, errors).
+        """
+        assert self._client is not None
+        succeeded = 0
+        errors: list[dict] = []
+
+        for folder, entries in uids_by_folder.items():
+            uids = [uid for _, uid in entries]
+            msg_ids = [mid for mid, _ in entries]
+            try:
+                self._client.select_folder(folder)
+                self._client.copy(uids, to_folder)
+                self._client.delete_messages(uids)
+                self._client.expunge(uids)
+                succeeded += len(entries)
+                logger.info(
+                    "imap.batch_moved",
+                    count=len(entries),
+                    from_folder=folder,
+                    to_folder=to_folder,
+                )
+            except Exception as e:
+                for mid in msg_ids:
+                    errors.append({"message_id": mid, "detail": str(e)})
+
+        return succeeded, errors
+
+    def _batch_add_flags_sync(
+        self,
+        uids_by_folder: dict[str, list[tuple[str, int]]],
+        flags: list[str],
+    ) -> tuple[int, list[dict]]:
+        """Batch STORE flags per folder.
+
+        Returns (succeeded_count, errors).
+        """
+        assert self._client is not None
+        succeeded = 0
+        errors: list[dict] = []
+
+        for folder, entries in uids_by_folder.items():
+            uids = [uid for _, uid in entries]
+            msg_ids = [mid for mid, _ in entries]
+            try:
+                self._client.select_folder(folder)
+                self._client.add_flags(uids, flags)
+                succeeded += len(entries)
+                logger.info(
+                    "imap.batch_flags_added",
+                    count=len(entries),
+                    folder=folder,
+                    flags=flags,
+                )
+            except Exception as e:
+                for mid in msg_ids:
+                    errors.append({"message_id": mid, "detail": str(e)})
+
+        return succeeded, errors
+
+    async def batch_move(
+        self,
+        message_ids: list[str],
+        to_folder: str,
+        from_folder: str | None = None,
+    ) -> tuple[int, list[dict]]:
+        """Batch move messages by COPY + DELETE + EXPUNGE, grouped by folder."""
+        await self._ensure_connected()
+        uids_by_folder, find_errors = await asyncio.to_thread(
+            self._batch_find_uids_sync, message_ids, from_folder
+        )
+        if not uids_by_folder:
+            return 0, find_errors
+        succeeded, move_errors = await asyncio.to_thread(
+            self._batch_move_sync, uids_by_folder, to_folder
+        )
+        return succeeded, find_errors + move_errors
+
+    async def batch_archive(
+        self,
+        message_ids: list[str],
+        from_folder: str | None = None,
+    ) -> tuple[int, list[dict]]:
+        """Batch move messages to Archive."""
+        return await self.batch_move(message_ids, "Archive", from_folder)
+
+    async def batch_delete(
+        self,
+        message_ids: list[str],
+        from_folder: str | None = None,
+    ) -> tuple[int, list[dict]]:
+        """Batch move messages to Trash."""
+        return await self.batch_move(message_ids, "Trash", from_folder)
+
+    async def batch_add_flags(
+        self,
+        message_ids: list[str],
+        flags: str,
+        folder: str | None = None,
+    ) -> tuple[int, list[dict]]:
+        """Batch add flags to messages."""
+        await self._ensure_connected()
+        flag_list = flags.split()
+        uids_by_folder, find_errors = await asyncio.to_thread(
+            self._batch_find_uids_sync, message_ids, folder
+        )
+        if not uids_by_folder:
+            return 0, find_errors
+        succeeded, flag_errors = await asyncio.to_thread(
+            self._batch_add_flags_sync, uids_by_folder, flag_list
+        )
+        return succeeded, find_errors + flag_errors

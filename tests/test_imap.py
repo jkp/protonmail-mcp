@@ -159,6 +159,146 @@ class TestFlags:
         mock_client.remove_flags.assert_called_once_with([42], [r"\Seen"])
 
 
+class TestBatchFindUidsSync:
+    async def test_finds_uids_in_specified_folder(self, mutator):
+        mock_client = _mock_imapclient()
+        # All messages found in INBOX
+        mock_client.search = MagicMock(side_effect=[[42], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            result = await mutator._batch_find_uids(
+                ["<msg1@example.com>", "<msg2@example.com>"], folder="INBOX"
+            )
+        assert result == {"INBOX": [("<msg1@example.com>", 42), ("<msg2@example.com>", 99)]}
+
+    async def test_groups_by_folder_when_no_folder_hint(self, mutator):
+        mock_client = _mock_imapclient()
+        # Folder-outer loop: INBOX selected once, search both messages
+        # msg1 found in INBOX, msg2 not. Then Archive selected, msg2 found.
+        mock_client.search = MagicMock(side_effect=[[42], [], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            result = await mutator._batch_find_uids(
+                ["<msg1@example.com>", "<msg2@example.com>"]
+            )
+        assert "INBOX" in result
+        assert result["INBOX"] == [("<msg1@example.com>", 42)]
+        assert "Archive" in result
+        assert result["Archive"] == [("<msg2@example.com>", 99)]
+
+    async def test_not_found_messages_returned_in_errors(self, mutator):
+        mock_client = _mock_imapclient()
+        # msg1 found in INBOX, missing not found in INBOX (only folder searched)
+        mock_client.search = MagicMock(side_effect=[[42], []])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            result, errors = await mutator._batch_find_uids_with_errors(
+                ["<msg1@example.com>", "<missing@example.com>"], folder="INBOX"
+            )
+        assert "INBOX" in result
+        assert len(errors) == 1
+        assert errors[0]["message_id"] == "<missing@example.com>"
+
+
+class TestBatchMoveSync:
+    async def test_batch_move_single_folder(self, mutator):
+        mock_client = _mock_imapclient()
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move(
+                ["<msg1@example.com>", "<msg2@example.com>"],
+                "Archive",
+                from_folder="INBOX",
+            )
+        assert succeeded == 2
+        assert errors == []
+        # Should batch COPY/DELETE/EXPUNGE with all UIDs
+        mock_client.copy.assert_called_once()
+        mock_client.delete_messages.assert_called_once()
+        mock_client.expunge.assert_called_once()
+
+    async def test_batch_move_error_isolation(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.copy = MagicMock(side_effect=Exception("Folder not found"))
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move(
+                ["<msg1@example.com>"], "NonExistent", from_folder="INBOX"
+            )
+        assert succeeded == 0
+        assert len(errors) == 1
+
+    async def test_batch_move_message_not_found(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(return_value=[])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move(
+                ["<missing@example.com>"], "Archive", from_folder="INBOX"
+            )
+        assert succeeded == 0
+        assert len(errors) == 1
+        assert "not found" in errors[0]["detail"].lower()
+
+
+class TestBatchAddFlagsSync:
+    async def test_batch_add_flags_single_folder(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(side_effect=[[42], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_add_flags(
+                ["<msg1@example.com>", "<msg2@example.com>"],
+                r"\Seen",
+                folder="INBOX",
+            )
+        assert succeeded == 2
+        assert errors == []
+        # Single STORE call with both UIDs
+        mock_client.add_flags.assert_called_once()
+        call_args = mock_client.add_flags.call_args
+        assert set(call_args[0][0]) == {42, 99}
+
+    async def test_batch_add_flags_error_isolation(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.add_flags = MagicMock(side_effect=Exception("Read-only"))
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_add_flags(
+                ["<msg1@example.com>"], r"\Seen", folder="INBOX"
+            )
+        assert succeeded == 0
+        assert len(errors) == 1
+
+
+class TestBatchArchive:
+    async def test_batch_archive_delegates_to_batch_move(self, mutator):
+        mock_client = _mock_imapclient()
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_archive(
+                ["<msg1@example.com>"], from_folder="INBOX"
+            )
+        assert succeeded == 1
+        mock_client.copy.assert_called_once()
+        # Verify destination is Archive
+        assert mock_client.copy.call_args[0][1] == "Archive"
+
+
+class TestBatchDelete:
+    async def test_batch_delete_delegates_to_batch_move(self, mutator):
+        mock_client = _mock_imapclient()
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_delete(
+                ["<msg1@example.com>"], from_folder="INBOX"
+            )
+        assert succeeded == 1
+        mock_client.copy.assert_called_once()
+        # Verify destination is Trash
+        assert mock_client.copy.call_args[0][1] == "Trash"
+
+
 class TestAutoReconnect:
     async def test_ensure_connected_reconnects_when_disconnected(self, mutator):
         mock_client = _mock_imapclient()
