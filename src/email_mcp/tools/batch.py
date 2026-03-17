@@ -26,6 +26,10 @@ _searcher: NotmuchSearcher | None = None
 
 
 _MAX_SAMPLE_SUBJECTS = 10
+# ProtonMail's API processes up to 150 messages per request, but each
+# message takes ~500ms server-side. We cap at 50 (~25s) to keep the AI
+# in the loop with fast feedback rather than blocking for minutes.
+_MAX_BATCH_SIZE = 50
 
 
 def _require_searcher() -> NotmuchSearcher:
@@ -266,6 +270,18 @@ async def _search_to_folder_groups(
     ]
 
 
+def _check_batch_size(result_count: int) -> dict[str, Any] | None:
+    """Return an error dict if the batch exceeds _MAX_BATCH_SIZE, else None."""
+    if result_count > _MAX_BATCH_SIZE:
+        return {
+            "error": "batch_too_large",
+            "count": result_count,
+            "limit": _MAX_BATCH_SIZE,
+            "hint": "Narrow your query (e.g. add in:inbox, older_than:7d, or a more specific from/subject)",
+        }
+    return None
+
+
 def _dry_run_response(
     results: list[dict[str, Any]],
     ids_by_folder: dict[str, list[str]],
@@ -293,6 +309,8 @@ async def search_and_mark_read(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
+    Limited to 50 messages per call — narrow the query if the dry run
+    shows more. This keeps each call fast (~25s max) with regular feedback.
 
     Args:
         query: Gmail-style search query (e.g. "from:newsletter", "is:unread in:inbox")
@@ -311,6 +329,10 @@ async def search_and_mark_read(
 
     if not ids_by_folder:
         return {"succeeded": 0, "failed": 0, "errors": []}
+
+    too_large = _check_batch_size(len(results))
+    if too_large:
+        return too_large
 
     imap = _require_imap()
     succeeded, errors = await imap.batch_add_flags_by_folder(
@@ -342,6 +364,8 @@ async def search_and_archive(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
+    Limited to 50 messages per call — narrow the query if the dry run
+    shows more. This keeps each call fast (~25s max) with regular feedback.
 
     Args:
         query: Gmail-style search query (e.g. "from:newsletter", "older_than:30d")
@@ -360,6 +384,10 @@ async def search_and_archive(
 
     if not ids_by_folder:
         return {"succeeded": 0, "failed": 0, "errors": []}
+
+    too_large = _check_batch_size(len(results))
+    if too_large:
+        return too_large
 
     imap = _require_imap()
     local_store = _require_store()
@@ -400,6 +428,8 @@ async def search_and_delete(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
+    Limited to 50 messages per call — narrow the query if the dry run
+    shows more. This keeps each call fast (~25s max) with regular feedback.
 
     Args:
         query: Gmail-style search query (e.g. "from:spam", "subject:unsubscribe")
@@ -418,6 +448,10 @@ async def search_and_delete(
 
     if not ids_by_folder:
         return {"succeeded": 0, "failed": 0, "errors": []}
+
+    too_large = _check_batch_size(len(results))
+    if too_large:
+        return too_large
 
     imap = _require_imap()
     local_store = _require_store()

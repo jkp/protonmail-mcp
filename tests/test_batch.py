@@ -437,6 +437,26 @@ class TestSearchAndMarkRead:
         assert result["error"] == "search_failed"
         assert "locked" in result["detail"]
 
+    async def test_rejects_batch_over_limit(self, mock_searcher):
+        from email_mcp.tools.batch import _MAX_BATCH_SIZE, search_and_mark_read
+
+        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 1)
+
+        result = await search_and_mark_read(query="from:x", dry_run=False)
+
+        assert result["error"] == "batch_too_large"
+        assert result["count"] == _MAX_BATCH_SIZE + 1
+        assert result["limit"] == _MAX_BATCH_SIZE
+
+    async def test_dry_run_still_works_over_limit(self, mock_searcher):
+        from email_mcp.tools.batch import _MAX_BATCH_SIZE, search_and_mark_read
+
+        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 1)
+
+        result = await search_and_mark_read(query="from:x", dry_run=True)
+
+        assert result["would_affect"] == _MAX_BATCH_SIZE + 1
+
 
 class TestSearchAndArchive:
     async def test_dry_run_returns_count(self, mock_searcher):
