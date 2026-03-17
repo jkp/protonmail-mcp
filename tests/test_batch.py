@@ -50,19 +50,43 @@ def mock_searcher():
 
 
 @pytest.fixture
-def mock_resolve_email():
-    """Mock _resolve_email to return fake email dicts."""
-    from email_mcp.models import Email
+def mock_db(tmp_path):
+    """Real SQLite Database with seeded test messages."""
+    import time
+    from email_mcp.db import Database, MessageRow
 
-    async def _resolve(message_id, folder=None):
-        return Email(
-            message_id=message_id,
-            subject=f"Subject for {message_id}",
-            body_plain="Hello",
-            folder=folder or "INBOX",
-        )
-
-    return _resolve
+    db = Database(tmp_path / "test.db")
+    db.messages.upsert(MessageRow(
+        pm_id="pm-001",
+        message_id="<msg1@example.com>",
+        subject="Subject for <msg1@example.com>",
+        sender_name="Alice",
+        sender_email="alice@example.com",
+        recipients=[{"name": "Bob", "address": "bob@example.com"}],
+        date=int(time.time()),
+        unread=True,
+        label_ids=["0"],
+        folder="INBOX",
+        size=512,
+        has_attachments=False,
+        body_indexed=False,
+    ))
+    db.messages.upsert(MessageRow(
+        pm_id="pm-002",
+        message_id="<msg2@example.com>",
+        subject="Subject for <msg2@example.com>",
+        sender_name="Charlie",
+        sender_email="charlie@example.com",
+        recipients=[{"name": "Bob", "address": "bob@example.com"}],
+        date=int(time.time()),
+        unread=False,
+        label_ids=["0"],
+        folder="INBOX",
+        size=256,
+        has_attachments=False,
+        body_indexed=False,
+    ))
+    return db
 
 
 @pytest.fixture(autouse=True)
@@ -78,10 +102,10 @@ def patch_batch(mock_imap, mock_sync_engine, mock_store, mock_searcher):
 
 
 class TestBatchRead:
-    async def test_reads_multiple_emails(self, mock_resolve_email):
+    async def test_reads_multiple_emails(self, mock_db):
         from email_mcp.tools.batch import batch_read
 
-        with patch("email_mcp.tools.batch._resolve_email", mock_resolve_email):
+        with patch("email_mcp.tools.batch.db", mock_db):
             result = await batch_read(
                 message_ids=["<msg1@example.com>", "<msg2@example.com>"]
             )
@@ -89,17 +113,10 @@ class TestBatchRead:
         assert result[0]["message_id"] == "<msg1@example.com>"
         assert result[1]["message_id"] == "<msg2@example.com>"
 
-    async def test_includes_error_for_not_found(self):
+    async def test_includes_error_for_not_found(self, mock_db):
         from email_mcp.tools.batch import batch_read
 
-        async def _resolve_with_failure(message_id, folder=None):
-            if "missing" in message_id:
-                return None
-            from email_mcp.models import Email
-
-            return Email(message_id=message_id, body_plain="Hello", folder="INBOX")
-
-        with patch("email_mcp.tools.batch._resolve_email", _resolve_with_failure):
+        with patch("email_mcp.tools.batch.db", mock_db):
             result = await batch_read(
                 message_ids=["<msg1@example.com>", "<missing@example.com>"]
             )
@@ -108,10 +125,10 @@ class TestBatchRead:
         assert "error" in result[1]
         assert result[1]["message_id"] == "<missing@example.com>"
 
-    async def test_empty_list_returns_empty(self, mock_resolve_email):
+    async def test_empty_list_returns_empty(self, mock_db):
         from email_mcp.tools.batch import batch_read
 
-        with patch("email_mcp.tools.batch._resolve_email", mock_resolve_email):
+        with patch("email_mcp.tools.batch.db", mock_db):
             result = await batch_read(message_ids=[])
         assert result == []
 

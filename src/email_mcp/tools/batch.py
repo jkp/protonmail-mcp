@@ -9,12 +9,12 @@ from typing import Any
 
 import structlog
 
+from email_mcp.db import _row_to_message
 from email_mcp.imap import ImapError, ImapMutator
 from email_mcp.search import NotmuchError, NotmuchSearcher, translate_query
-from email_mcp.server import mcp
+from email_mcp.server import db, mcp
 from email_mcp.store import MaildirStore
 from email_mcp.sync import SyncEngine
-from email_mcp.tools.reading import _resolve_email
 
 logger = structlog.get_logger()
 
@@ -58,22 +58,19 @@ def _require_store() -> MaildirStore:
 
 
 def _email_to_dict(email) -> dict[str, Any]:
-    """Convert an Email model to the same dict shape as read_email."""
-    body = email.body_html if email.body_html else email.body_plain
+    """Convert a MessageRow to the same dict shape as read_email."""
+    body = db.bodies.get(email.pm_id) or ""
     return {
         "message_id": email.message_id,
-        "from": str(email.from_),
-        "to": [str(addr) for addr in email.to],
-        "cc": [str(addr) for addr in email.cc],
+        "pm_id": email.pm_id,
+        "from": f"{email.sender_name} <{email.sender_email}>" if email.sender_name else email.sender_email,
+        "to": email.recipients,
         "subject": email.subject,
-        "date": email.date_str,
+        "date": email.date,
         "body": body,
         "folder": email.folder,
-        "flags": email.flags,
-        "attachments": [
-            {"filename": a.filename, "content_type": a.content_type, "size": a.size}
-            for a in email.attachments
-        ],
+        "unread": email.unread,
+        "has_attachments": email.has_attachments,
     }
 
 
@@ -101,14 +98,17 @@ async def batch_read(
         return []
 
     async def _read_one(message_id: str) -> dict[str, Any]:
-        email = await _resolve_email(message_id, folder)
-        if email is None:
+        row = db.execute(
+            "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
+            [message_id, message_id],
+        ).fetchone()
+        if row is None:
             return {
-                "error": "not_found_locally",
+                "error": "not_found",
                 "message_id": message_id,
-                "detail": "This email may have been recently moved. Try again in ~60s.",
+                "detail": "Message not found in local database.",
             }
-        return _email_to_dict(email)
+        return _email_to_dict(_row_to_message(row))
 
     results = await asyncio.gather(*[_read_one(mid) for mid in message_ids])
     logger.info("tool.batch_read.done", count=len(results))

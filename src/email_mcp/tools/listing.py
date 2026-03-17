@@ -4,7 +4,7 @@ from typing import Any
 
 import structlog
 
-from email_mcp.server import mcp, store
+from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
 
@@ -20,8 +20,7 @@ async def list_emails(
     """List email summaries from a folder, sorted newest first.
 
     Use this to browse a folder (INBOX, Sent, Archive, etc.) without searching.
-    Faster than search — reads directly from Maildir, no indexing needed.
-    Use search() only when you need full-text or filtered queries.
+    Use search() when you need full-text or filtered queries.
 
     Returns a dict with total count and pagination info so you know if more
     pages are available.
@@ -32,24 +31,29 @@ async def list_emails(
         offset: Number of emails to skip
     """
     logger.info("tool.list_emails", folder=folder, limit=limit, offset=offset)
-    total = store.count_emails(folder=folder)
-    emails = store.list_emails(folder=folder, limit=limit, offset=offset)
-    logger.info("tool.list_emails.done", count=len(emails), total=total)
+
+    rows = db.messages.list_by_folder(folder=folder, limit=limit, offset=offset)
+    counts = db.messages.count_by_folder(folder=folder)
+    total = counts["total"]
+
+    logger.info("tool.list_emails.done", count=len(rows), total=total)
     return {
         "total": total,
         "offset": offset,
-        "count": len(emails),
+        "count": len(rows),
         "emails": [
             {
-                "message_id": e.message_id,
-                "from": str(e.from_),
-                "to": [str(addr) for addr in e.to],
-                "subject": e.subject,
-                "date": e.date_str,
-                "folder": e.folder,
-                "flags": e.flags,
+                "message_id": r.message_id,
+                "pm_id": r.pm_id,
+                "from": f"{r.sender_name} <{r.sender_email}>" if r.sender_name else r.sender_email,
+                "to": r.recipients,
+                "subject": r.subject,
+                "date": r.date,
+                "folder": r.folder,
+                "unread": bool(r.unread),
+                "has_attachments": bool(r.has_attachments),
             }
-            for e in emails
+            for r in rows
         ],
     }
 
@@ -60,13 +64,23 @@ async def list_emails(
 async def list_folders() -> list[dict[str, Any]]:
     """List all mail folders with message counts."""
     logger.info("tool.list_folders")
-    folders = store.list_folders()
-    logger.info("tool.list_folders.done", count=len(folders))
+
+    rows = db.execute(
+        """
+        SELECT folder, COUNT(*) as total, SUM(unread) as unread_count
+        FROM messages
+        WHERE folder IS NOT NULL
+        GROUP BY folder
+        ORDER BY folder
+        """
+    ).fetchall()
+
+    logger.info("tool.list_folders.done", count=len(rows))
     return [
         {
-            "name": f.name,
-            "count": f.count,
-            "unread": f.unread,
+            "name": row[0],
+            "count": row[1],
+            "unread": row[2] or 0,
         }
-        for f in folders
+        for row in rows
     ]

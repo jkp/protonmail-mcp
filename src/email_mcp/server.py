@@ -8,6 +8,7 @@ import structlog
 from fastmcp import FastMCP
 
 from email_mcp.config import Settings
+from email_mcp.db import Database
 from email_mcp.logging import configure_logging
 from email_mcp.store import MaildirStore
 
@@ -262,6 +263,7 @@ mcp = FastMCP(
 )
 
 store = MaildirStore(settings.maildir_path)
+db = Database(settings.database_path)
 
 # Import tools to register them with the mcp instance
 import email_mcp.tools.batch  # noqa: F401, E402

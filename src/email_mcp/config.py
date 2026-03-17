@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     def maildir_path(self) -> Path:
         return self.maildir_root.expanduser().resolve()
 
+    # v4 SQLite database
+    db_path: Path = Path("~/.local/share/email-mcp/email.db")
+
+    @property
+    def database_path(self) -> Path:
+        return self.db_path.expanduser().resolve()
+
     # IMAP cert (shared between IMAP mutator and STARTTLS)
     imap_cert_path: str = ""
 
