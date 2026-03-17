@@ -116,7 +116,10 @@ async def batch_read(
 async def batch_archive(
     message_ids: list[str], folder: str = "INBOX"
 ) -> dict[str, Any]:
-    """Archive multiple emails in one call.
+    """Archive multiple emails by Message-ID.
+
+    For bulk operations (e.g. archiving all newsletters), prefer
+    search_and_archive which takes a query and doesn't require listing IDs.
 
     Args:
         message_ids: List of Message-ID header values to archive
@@ -153,7 +156,10 @@ async def batch_archive(
 async def batch_mark_read(
     message_ids: list[str], folder: str | None = None
 ) -> dict[str, Any]:
-    r"""Mark multiple emails as read in one call.
+    r"""Mark multiple emails as read by Message-ID.
+
+    For bulk operations (e.g. marking all newsletters read), prefer
+    search_and_mark_read which takes a query and doesn't require listing IDs.
 
     Args:
         message_ids: List of Message-ID header values to mark as read
@@ -187,7 +193,10 @@ async def batch_delete(
     confirm: bool = False,
     folder: str | None = None,
 ) -> dict[str, Any]:
-    """Delete multiple emails by moving them to Trash.
+    """Delete multiple emails by Message-ID (moves to Trash).
+
+    For bulk operations (e.g. deleting all spam), prefer search_and_delete
+    which takes a query and doesn't require listing IDs.
 
     Requires confirm=True to execute. Returns an error if confirm is False.
 
@@ -279,12 +288,15 @@ async def search_and_mark_read(
 ) -> dict[str, Any]:
     """Mark all emails matching a search query as read.
 
-    Uses notmuch for instant local search, then applies flags via IMAP
-    with pre-resolved folder hints (fast).
+    Preferred over batch_mark_read for bulk operations — takes a query
+    instead of requiring individual Message-IDs.
+
+    Workflow: call with dry_run=True first to preview (returns count,
+    sample subjects, and per-folder breakdown), then dry_run=False to execute.
 
     Args:
-        query: Gmail-style search query (e.g. "from:newsletter")
-        dry_run: If True (default), return count + sample subjects without acting
+        query: Gmail-style search query (e.g. "from:newsletter", "is:unread in:inbox")
+        dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_mark_read", query=query, dry_run=dry_run)
 
@@ -325,12 +337,15 @@ async def search_and_archive(
 ) -> dict[str, Any]:
     """Archive all emails matching a search query.
 
-    Uses notmuch for instant local search, then moves via IMAP
-    with pre-resolved folder hints (fast).
+    Preferred over batch_archive for bulk operations — takes a query
+    instead of requiring individual Message-IDs.
+
+    Workflow: call with dry_run=True first to preview (returns count,
+    sample subjects, and per-folder breakdown), then dry_run=False to execute.
 
     Args:
-        query: Gmail-style search query (e.g. "from:newsletter")
-        dry_run: If True (default), return count + sample subjects without acting
+        query: Gmail-style search query (e.g. "from:newsletter", "older_than:30d")
+        dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_archive", query=query, dry_run=dry_run)
 
@@ -380,12 +395,15 @@ async def search_and_delete(
 ) -> dict[str, Any]:
     """Delete all emails matching a search query (move to Trash).
 
-    Uses notmuch for instant local search, then moves via IMAP
-    with pre-resolved folder hints (fast).
+    Preferred over batch_delete for bulk operations — takes a query
+    instead of requiring individual Message-IDs.
+
+    Workflow: call with dry_run=True first to preview (returns count,
+    sample subjects, and per-folder breakdown), then dry_run=False to execute.
 
     Args:
-        query: Gmail-style search query (e.g. "from:spam")
-        dry_run: If True (default), return count + sample subjects without acting
+        query: Gmail-style search query (e.g. "from:spam", "subject:unsubscribe")
+        dry_run: If True (default), preview what would be affected without acting
     """
     logger.info("tool.search_and_delete", query=query, dry_run=dry_run)
 
