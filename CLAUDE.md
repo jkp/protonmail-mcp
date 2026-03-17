@@ -48,6 +48,19 @@ uv run pytest -v            # verbose
 uv run pytest --cov         # with coverage
 ```
 
+### No sleep-based assertions
+
+**Never use `time.sleep()` or `asyncio.sleep(N)` (where N > 0) to wait for async behavior in tests.** These make tests slow, flaky, and timing-dependent.
+
+Instead, use event-based synchronization:
+
+- **Debounce/timer tests:** Set debounce to 0, wrap the target method to signal an `asyncio.Event` on completion, then `await asyncio.wait_for(event.wait(), timeout=1.0)`.
+- **Periodic loop tests:** Patch the engine's `_sleep` method with a noop that yields (`await asyncio.sleep(0)`), and cancel the loop from inside after N iterations.
+- **Thread-blocking tests (e.g. IDLE):** Use `threading.Event` gates instead of `time.sleep()`. The mock blocks on `gate.wait()`, and the test calls `gate.set()` before stopping — the thread releases immediately.
+- **Timer reset tests:** Inspect `handle.cancelled()` directly rather than sleeping past the timer.
+
+`await asyncio.sleep(0)` is fine — it yields to the event loop without wall-clock delay.
+
 ## Configuration
 
 All env vars use `EMAIL_MCP_` prefix:
