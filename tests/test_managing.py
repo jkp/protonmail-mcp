@@ -1,169 +1,211 @@
-"""Tests for email_mcp.tools.managing — IMAP-first managing tools."""
+"""Tests for email_mcp.tools.managing — ProtonMail API mutation tools (v4)."""
 
+import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
-@pytest.fixture
-def mock_imap():
-    from email_mcp.imap import ImapMutator
-
-    m = AsyncMock(spec=ImapMutator)
-    return m
+from email_mcp.db import Database, MessageRow
 
 
-@pytest.fixture
-def mock_sync_engine():
-    from email_mcp.sync import SyncEngine
-
-    m = MagicMock(spec=SyncEngine)
-    m.request_reindex = MagicMock()
-    m.sync = AsyncMock()
-    return m
-
-
-@pytest.fixture
-def mock_store():
-    from email_mcp.store import MaildirStore
-
-    m = MagicMock(spec=MaildirStore)
-    m.optimistic_move = MagicMock(return_value=True)
-    return m
+def _make_row(pm_id: str, message_id: str, folder: str = "INBOX") -> MessageRow:
+    return MessageRow(
+        pm_id=pm_id,
+        message_id=message_id,
+        subject=f"Test {pm_id}",
+        sender_name="Alice",
+        sender_email="alice@example.com",
+        recipients=[],
+        date=int(time.time()),
+        unread=True,
+        label_ids=["0"],
+        folder=folder,
+        size=512,
+        has_attachments=False,
+        body_indexed=False,
+    )
 
 
 @pytest.fixture
-def mock_searcher():
-    from email_mcp.search import NotmuchSearcher
+def db(tmp_path: Path) -> Database:
+    d = Database(tmp_path / "test.db")
+    d.messages.upsert(_make_row("pm-001", "<msg1@example.com>", "INBOX"))
+    d.messages.upsert(_make_row("pm-002", "<msg2@example.com>", "INBOX"))
+    d.messages.upsert(_make_row("pm-archived", "<archived@example.com>", "Archive"))
+    return d
 
-    m = AsyncMock(spec=NotmuchSearcher)
-    return m
+
+@pytest.fixture
+def mock_api():
+    api = MagicMock()
+    api.label_messages = AsyncMock()
+    api.mark_read = AsyncMock()
+    api.mark_unread = AsyncMock()
+    return api
 
 
 @pytest.fixture(autouse=True)
-def patch_managing(mock_imap, mock_sync_engine, mock_store, mock_searcher):
-    """Patch module-level dependencies in managing tools."""
+def patch_managing(db, mock_api):
     with (
-        patch("email_mcp.tools.managing._imap", mock_imap),
-        patch("email_mcp.tools.managing._sync_engine", mock_sync_engine),
-        patch("email_mcp.tools.managing._store", mock_store),
-        patch("email_mcp.tools.managing._searcher", mock_searcher),
+        patch("email_mcp.tools.managing.db", db),
+        patch("email_mcp.tools.managing._api", mock_api),
     ):
         yield
 
 
 class TestArchive:
-    async def test_imap_first_then_optimistic_move(self, mock_imap, mock_store, mock_sync_engine):
+    async def test_archives_by_message_id(self, mock_api, db):
         from email_mcp.tools.managing import archive
 
-        result = await archive("<test@example.com>", folder="INBOX")
-        mock_imap.archive.assert_awaited_once_with("<test@example.com>", from_folder="INBOX")
-        mock_store.optimistic_move.assert_called_once_with("<test@example.com>", "Archive", "INBOX")
-        mock_sync_engine.request_reindex.assert_called_once()
+        result = await archive("<msg1@example.com>")
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "6")
         assert result["status"] == "archived"
 
-    async def test_imap_failure_returns_error(self, mock_imap, mock_store):
-        from email_mcp.imap import ImapError
+    async def test_archive_updates_sqlite(self, db):
         from email_mcp.tools.managing import archive
 
-        mock_imap.archive.side_effect = ImapError("Connection refused")
-        result = await archive("<test@example.com>")
+        await archive("<msg1@example.com>")
+        row = db.messages.get("pm-001")
+        assert row.folder == "Archive"
+
+    async def test_archive_not_found(self, mock_api):
+        from email_mcp.tools.managing import archive
+
+        result = await archive("<missing@example.com>")
         assert "error" in result
-        mock_store.optimistic_move.assert_not_called()
+        mock_api.label_messages.assert_not_awaited()
 
-    async def test_optimistic_move_failure_still_succeeds(self, mock_imap, mock_store):
+    async def test_archive_api_error_returns_error(self, mock_api):
+        from email_mcp.proton_api import ProtonAPIError
         from email_mcp.tools.managing import archive
 
-        mock_store.optimistic_move.return_value = False
-        result = await archive("<test@example.com>")
-        assert result["status"] == "archived"
+        mock_api.label_messages.side_effect = ProtonAPIError(422, "Invalid")
+        result = await archive("<msg1@example.com>")
+        assert "error" in result
 
 
 class TestDelete:
-    async def test_imap_first_then_optimistic_move(self, mock_imap, mock_store, mock_sync_engine):
+    async def test_deletes_by_message_id(self, mock_api):
         from email_mcp.tools.managing import delete
 
-        result = await delete("<test@example.com>", folder="INBOX")
-        mock_imap.delete.assert_awaited_once_with("<test@example.com>", from_folder="INBOX")
-        mock_store.optimistic_move.assert_called_once_with("<test@example.com>", "Trash", "INBOX")
-        mock_sync_engine.request_reindex.assert_called_once()
+        result = await delete("<msg1@example.com>")
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "3")
         assert result["status"] == "deleted"
+
+    async def test_delete_updates_sqlite(self, db):
+        from email_mcp.tools.managing import delete
+
+        await delete("<msg1@example.com>")
+        row = db.messages.get("pm-001")
+        assert row.folder == "Trash"
+
+    async def test_delete_not_found(self, mock_api):
+        from email_mcp.tools.managing import delete
+
+        result = await delete("<missing@example.com>")
+        assert "error" in result
+        mock_api.label_messages.assert_not_awaited()
 
 
 class TestMoveEmail:
-    async def test_imap_first_then_optimistic_move(self, mock_imap, mock_store, mock_sync_engine):
+    async def test_move_to_archive(self, mock_api):
         from email_mcp.tools.managing import move_email
 
-        result = await move_email("<test@example.com>", "Sent", from_folder="INBOX")
-        mock_imap.move.assert_awaited_once_with(
-            "<test@example.com>", "Sent", from_folder="INBOX"
-        )
-        mock_store.optimistic_move.assert_called_once_with("<test@example.com>", "Sent", "INBOX")
-        mock_sync_engine.request_reindex.assert_called_once()
+        result = await move_email("<msg1@example.com>", "Archive")
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "6")
         assert result["status"] == "moved"
+
+    async def test_move_to_trash(self, mock_api):
+        from email_mcp.tools.managing import move_email
+
+        result = await move_email("<msg1@example.com>", "Trash")
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "3")
+
+    async def test_move_to_spam(self, mock_api):
+        from email_mcp.tools.managing import move_email
+
+        result = await move_email("<msg1@example.com>", "Spam")
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "4")
+
+    async def test_move_to_inbox(self, mock_api):
+        from email_mcp.tools.managing import move_email
+
+        result = await move_email("<archived@example.com>", "INBOX")
+        mock_api.label_messages.assert_awaited_once_with(["pm-archived"], "0")
+
+    async def test_move_updates_sqlite(self, db):
+        from email_mcp.tools.managing import move_email
+
+        await move_email("<msg1@example.com>", "Archive")
+        row = db.messages.get("pm-001")
+        assert row.folder == "Archive"
+
+    async def test_move_unknown_folder_returns_error(self, mock_api):
+        from email_mcp.tools.managing import move_email
+
+        result = await move_email("<msg1@example.com>", "UnknownFolder")
+        assert "error" in result
+        mock_api.label_messages.assert_not_awaited()
+
+    async def test_move_not_found(self, mock_api):
+        from email_mcp.tools.managing import move_email
+
+        result = await move_email("<missing@example.com>", "Archive")
+        assert "error" in result
+        mock_api.label_messages.assert_not_awaited()
+
+
+class TestMarkRead:
+    async def test_marks_read(self, mock_api):
+        from email_mcp.tools.managing import mark_read
+
+        result = await mark_read("<msg1@example.com>")
+        mock_api.mark_read.assert_awaited_once_with(["pm-001"])
+        assert result["status"] == "ok"
+
+    async def test_marks_read_updates_sqlite(self, db):
+        from email_mcp.tools.managing import mark_read
+
+        await mark_read("<msg1@example.com>")
+        row = db.messages.get("pm-001")
+        assert row.unread is False
+
+    async def test_mark_read_not_found(self, mock_api):
+        from email_mcp.tools.managing import mark_read
+
+        result = await mark_read("<missing@example.com>")
+        assert "error" in result
+        mock_api.mark_read.assert_not_awaited()
 
 
 class TestArchiveThread:
-    async def test_archives_all_messages(self, mock_imap, mock_store, mock_sync_engine, mock_searcher):
+    async def test_archives_single_message(self, mock_api):
         from email_mcp.tools.managing import archive_thread
 
-        mock_store.root = "/mail"
-        mock_searcher.find_thread_messages.return_value = [
-            {"message_id": "msg1@example.com", "path": "/mail/INBOX/cur/msg1"},
-            {"message_id": "msg2@example.com", "path": "/mail/INBOX/cur/msg2"},
-        ]
         result = await archive_thread("<msg1@example.com>")
-        assert mock_imap.archive.await_count == 2
-        assert result["archived"] == 2
+        mock_api.label_messages.assert_awaited_once_with(["pm-001"], "6")
+        assert result["archived"] >= 1
 
-    async def test_skips_already_archived(self, mock_imap, mock_store, mock_sync_engine, mock_searcher):
+    async def test_archive_thread_not_found(self, mock_api):
         from email_mcp.tools.managing import archive_thread
 
-        mock_store.root = "/mail"
-        mock_searcher.find_thread_messages.return_value = [
-            {"message_id": "msg1@example.com", "path": "/mail/INBOX/cur/msg1"},
-            {"message_id": "msg2@example.com", "path": "/mail/Archive/cur/msg2"},
-        ]
-        result = await archive_thread("<msg1@example.com>")
-        assert mock_imap.archive.await_count == 1
-        assert result["archived"] == 1
-        assert result["skipped"] == 1
-
-    async def test_thread_not_found(self, mock_searcher):
-        from email_mcp.tools.managing import archive_thread
-
-        mock_searcher.find_thread_messages.return_value = []
         result = await archive_thread("<missing@example.com>")
         assert "error" in result
 
-    async def test_partial_failures(self, mock_imap, mock_store, mock_searcher, mock_sync_engine):
-        from email_mcp.imap import ImapError
+    async def test_skips_already_archived(self, mock_api):
         from email_mcp.tools.managing import archive_thread
 
-        mock_store.root = "/mail"
-        mock_searcher.find_thread_messages.return_value = [
-            {"message_id": "msg1@example.com", "path": "/mail/INBOX/cur/msg1"},
-            {"message_id": "msg2@example.com", "path": "/mail/INBOX/cur/msg2"},
-        ]
-        # First succeeds, second fails
-        mock_imap.archive.side_effect = [None, ImapError("Timeout")]
-        result = await archive_thread("<msg1@example.com>")
-        assert result["archived"] == 1
-        assert result["failed"] == 1
+        result = await archive_thread("<archived@example.com>")
+        # Already in Archive — skipped, not re-archived
+        mock_api.label_messages.assert_not_awaited()
+        assert result["skipped"] == 1
 
 
 class TestSyncNow:
-    async def test_sync_now(self, mock_sync_engine):
+    async def test_sync_now_returns_db_stats(self, db):
         from email_mcp.tools.managing import sync_now
 
-        mock_sync_engine.sync = AsyncMock()
         result = await sync_now()
-        mock_sync_engine.sync.assert_awaited_once()
-        assert result["status"] == "synced"
-
-    async def test_sync_now_error(self, mock_sync_engine):
-        from email_mcp.tools.managing import sync_now
-
-        mock_sync_engine.sync = AsyncMock(side_effect=Exception("Connection refused"))
-        result = await sync_now()
-        assert result["status"] == "error"
+        assert result["status"] == "ok"
+        assert "message_count" in result

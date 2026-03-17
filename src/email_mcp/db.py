@@ -296,6 +296,9 @@ class Database:
     def execute(self, sql: str, params: list[Any] | None = None) -> sqlite3.Cursor:
         return self._conn.execute(sql, params or [])
 
+    def commit(self) -> None:
+        self._conn.commit()
+
     def close(self) -> None:
         self._conn.close()
 

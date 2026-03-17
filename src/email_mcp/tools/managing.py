@@ -1,43 +1,63 @@
-"""Managing tools: archive, delete, move_email, archive_thread, sync_now.
+"""Managing tools: archive, delete, move_email, mark_read, archive_thread, sync_now.
 
-v3: IMAP-first mutations with optimistic local moves.
+v4: Mutations via ProtonMail native API. SQLite updated optimistically.
+Event loop confirms changes on the next poll.
 """
 
 from typing import Any
 
 import structlog
 
-from email_mcp.imap import ImapError, ImapMutator
-from email_mcp.search import NotmuchSearcher
-from email_mcp.server import mcp
-from email_mcp.store import MaildirStore
-from email_mcp.sync import SyncEngine
+from email_mcp.proton_api import ProtonAPIError, ProtonClient
+from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
 
-# Module-level refs — set during server lifespan
-_imap: ImapMutator | None = None
-_sync_engine: SyncEngine | None = None
-_store: MaildirStore | None = None
-_searcher: NotmuchSearcher | None = None
+# Module-level ref — set during server lifespan
+_api: ProtonClient | None = None
+
+# ProtonMail system label IDs
+_FOLDER_TO_LABEL: dict[str, str] = {
+    "INBOX":   "0",
+    "Drafts":  "1",
+    "Sent":    "2",
+    "Trash":   "3",
+    "Spam":    "4",
+    "Archive": "6",
+}
 
 
-def _require_imap() -> ImapMutator:
-    if _imap is None:
-        raise RuntimeError("IMAP mutator not initialized")
-    return _imap
+def _require_api() -> ProtonClient:
+    if _api is None:
+        raise RuntimeError("ProtonMail API not initialized")
+    return _api
 
 
-def _require_sync() -> SyncEngine:
-    if _sync_engine is None:
-        raise RuntimeError("Sync engine not initialized")
-    return _sync_engine
+def _resolve_pm_id(message_id: str) -> str | None:
+    """Look up pm_id by RFC 2822 Message-ID or pm_id directly."""
+    row = db.execute(
+        "SELECT pm_id FROM messages WHERE message_id = ? OR pm_id = ?",
+        [message_id, message_id],
+    ).fetchone()
+    return row[0] if row else None
 
 
-def _require_store() -> MaildirStore:
-    if _store is None:
-        raise RuntimeError("Store not initialized")
-    return _store
+def _optimistic_update_folder(pm_id: str, folder: str) -> None:
+    """Update folder in SQLite immediately (event loop confirms later)."""
+    label_id = _FOLDER_TO_LABEL.get(folder, "")
+    db.execute(
+        "UPDATE messages SET folder = ?, label_ids = ?, updated_at = unixepoch() WHERE pm_id = ?",
+        [folder, f'["{label_id}"]', pm_id],
+    )
+    db.commit()
+
+
+def _optimistic_update_read(pm_id: str, unread: bool) -> None:
+    db.execute(
+        "UPDATE messages SET unread = ?, updated_at = unixepoch() WHERE pm_id = ?",
+        [int(unread), pm_id],
+    )
+    db.commit()
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Archive Email"})
@@ -45,27 +65,24 @@ async def archive(message_id: str, folder: str | None = None) -> dict[str, Any]:
     """Archive an email by moving it to the Archive folder.
 
     Args:
-        message_id: The Message-ID of the email to archive
-        folder: Current folder of the email (optional hint)
+        message_id: The Message-ID (or pm_id) of the email to archive
+        folder: Ignored in v4 — folder is derived from SQLite
     """
-    logger.info("tool.archive", message_id=message_id, folder=folder)
-    imap = _require_imap()
-    store = _require_store()
-    sync = _require_sync()
+    logger.info("tool.archive", message_id=message_id)
+    pm_id = _resolve_pm_id(message_id)
+    if pm_id is None:
+        return {"error": "not_found", "message_id": message_id}
 
+    api = _require_api()
     try:
-        await imap.archive(message_id, from_folder=folder)
-    except ImapError as e:
-        logger.error("tool.archive.imap_failed", message_id=message_id, error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+        await api.label_messages([pm_id], "6")
+    except ProtonAPIError as e:
+        logger.error("tool.archive.api_failed", pm_id=pm_id, error=str(e))
+        return {"error": "api_error", "detail": str(e)}
 
-    # Optimistic local move (best-effort)
-    if not store.optimistic_move(message_id, "Archive", folder):
-        logger.debug("tool.archive.optimistic_move_failed", message_id=message_id)
-
-    sync.request_reindex()
-    logger.info("tool.archive.done", message_id=message_id)
-    return {"status": "archived", "message_id": message_id}
+    _optimistic_update_folder(pm_id, "Archive")
+    logger.info("tool.archive.done", pm_id=pm_id)
+    return {"status": "archived", "message_id": message_id, "pm_id": pm_id}
 
 
 @mcp.tool(annotations={"destructiveHint": True, "title": "Delete Email"})
@@ -73,26 +90,24 @@ async def delete(message_id: str, folder: str | None = None) -> dict[str, Any]:
     """Delete an email by moving it to Trash.
 
     Args:
-        message_id: The Message-ID of the email to delete
-        folder: Current folder of the email (optional hint)
+        message_id: The Message-ID (or pm_id) of the email to delete
+        folder: Ignored in v4
     """
-    logger.info("tool.delete", message_id=message_id, folder=folder)
-    imap = _require_imap()
-    store = _require_store()
-    sync = _require_sync()
+    logger.info("tool.delete", message_id=message_id)
+    pm_id = _resolve_pm_id(message_id)
+    if pm_id is None:
+        return {"error": "not_found", "message_id": message_id}
 
+    api = _require_api()
     try:
-        await imap.delete(message_id, from_folder=folder)
-    except ImapError as e:
-        logger.error("tool.delete.imap_failed", message_id=message_id, error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+        await api.label_messages([pm_id], "3")
+    except ProtonAPIError as e:
+        logger.error("tool.delete.api_failed", pm_id=pm_id, error=str(e))
+        return {"error": "api_error", "detail": str(e)}
 
-    if not store.optimistic_move(message_id, "Trash", folder):
-        logger.debug("tool.delete.optimistic_move_failed", message_id=message_id)
-
-    sync.request_reindex()
-    logger.info("tool.delete.done", message_id=message_id)
-    return {"status": "deleted", "message_id": message_id}
+    _optimistic_update_folder(pm_id, "Trash")
+    logger.info("tool.delete.done", pm_id=pm_id)
+    return {"status": "deleted", "message_id": message_id, "pm_id": pm_id}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Move Email"})
@@ -101,28 +116,56 @@ async def move_email(
 ) -> dict[str, Any]:
     """Move an email to a different folder.
 
+    Supported folders: INBOX, Archive, Trash, Spam, Sent, Drafts
+
     Args:
-        message_id: The Message-ID of the email to move
-        to_folder: Destination folder
-        from_folder: Current folder (optional hint)
+        message_id: The Message-ID (or pm_id) of the email to move
+        to_folder: Destination folder name
+        from_folder: Ignored in v4
     """
     logger.info("tool.move_email", message_id=message_id, to_folder=to_folder)
-    imap = _require_imap()
-    store = _require_store()
-    sync = _require_sync()
 
+    label_id = _FOLDER_TO_LABEL.get(to_folder)
+    if label_id is None:
+        return {"error": "unknown_folder", "folder": to_folder,
+                "valid_folders": list(_FOLDER_TO_LABEL.keys())}
+
+    pm_id = _resolve_pm_id(message_id)
+    if pm_id is None:
+        return {"error": "not_found", "message_id": message_id}
+
+    api = _require_api()
     try:
-        await imap.move(message_id, to_folder, from_folder=from_folder)
-    except ImapError as e:
-        logger.error("tool.move_email.imap_failed", message_id=message_id, error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+        await api.label_messages([pm_id], label_id)
+    except ProtonAPIError as e:
+        logger.error("tool.move_email.api_failed", pm_id=pm_id, error=str(e))
+        return {"error": "api_error", "detail": str(e)}
 
-    if not store.optimistic_move(message_id, to_folder, from_folder):
-        logger.debug("tool.move_email.optimistic_move_failed", message_id=message_id)
+    _optimistic_update_folder(pm_id, to_folder)
+    logger.info("tool.move_email.done", pm_id=pm_id, to_folder=to_folder)
+    return {"status": "moved", "message_id": message_id, "pm_id": pm_id, "to_folder": to_folder}
 
-    sync.request_reindex()
-    logger.info("tool.move_email.done", message_id=message_id, to_folder=to_folder)
-    return {"status": "moved", "message_id": message_id, "to_folder": to_folder}
+
+@mcp.tool(annotations={"destructiveHint": False, "title": "Mark Email Read"})
+async def mark_read(message_id: str) -> dict[str, Any]:
+    """Mark an email as read.
+
+    Args:
+        message_id: The Message-ID (or pm_id) of the email
+    """
+    logger.info("tool.mark_read", message_id=message_id)
+    pm_id = _resolve_pm_id(message_id)
+    if pm_id is None:
+        return {"error": "not_found", "message_id": message_id}
+
+    api = _require_api()
+    try:
+        await api.mark_read([pm_id])
+    except ProtonAPIError as e:
+        return {"error": "api_error", "detail": str(e)}
+
+    _optimistic_update_read(pm_id, unread=False)
+    return {"status": "ok", "message_id": message_id, "pm_id": pm_id}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Archive Thread"})
@@ -130,101 +173,97 @@ async def archive_thread(
     message_id: str,
     mark_as_read: bool = True,
 ) -> dict[str, Any]:
-    """Archive an entire email thread. Finds all messages in the thread
-    via notmuch, archives each via IMAP, and optimistically moves local files.
+    """Archive an email thread. Looks up all messages sharing the same
+    conversation by subject prefix and archives them via the ProtonMail API.
 
     Args:
-        message_id: The Message-ID of any email in the thread
+        message_id: The Message-ID (or pm_id) of any email in the thread
         mark_as_read: Mark all messages as read before archiving (default: True)
     """
-    logger.info("tool.archive_thread", message_id=message_id, mark_as_read=mark_as_read)
-    imap = _require_imap()
-    store = _require_store()
-    sync = _require_sync()
+    logger.info("tool.archive_thread", message_id=message_id)
 
-    if _searcher is None:
-        return {"error": "Search not initialized"}
+    # Find the anchor message
+    row = db.execute(
+        "SELECT pm_id, subject, folder FROM messages WHERE message_id = ? OR pm_id = ?",
+        [message_id, message_id],
+    ).fetchone()
+    if row is None:
+        return {"error": f"Message not found: {message_id}"}
 
-    messages = await _searcher.find_thread_messages(message_id)
-    if not messages:
-        return {"error": f"Thread not found for: {message_id}"}
+    anchor_pm_id, subject, anchor_folder = row[0], row[1], row[2]
 
-    archived = 0
-    skipped = 0
-    failed = 0
-    for msg in messages:
-        mid = msg["message_id"]
-        path = msg.get("path", "")
+    # Find all non-archived messages with the same subject (simple thread heuristic)
+    # A proper implementation would use ConversationID from the ProtonMail API
+    base_subject = (subject or "").removeprefix("Re: ").removeprefix("Fwd: ").strip()
+    thread_rows = db.execute(
+        "SELECT pm_id, folder FROM messages WHERE (subject = ? OR subject = ? OR subject = ?) AND folder != 'Archive'",
+        [base_subject, f"Re: {base_subject}", f"Fwd: {base_subject}"],
+    ).fetchall()
 
-        # Derive folder from notmuch path
-        folder = None
-        if path and store.root:
-            try:
-                from pathlib import Path
+    # If no other messages found, just use the anchor
+    if not thread_rows:
+        if anchor_folder == "Archive":
+            return {"status": "archived", "archived": 0, "skipped": 1, "total": 1}
+        thread_rows = [(anchor_pm_id, anchor_folder)]
 
-                relative = Path(path).relative_to(store.root)
-                parts = relative.parts
-                if len(parts) >= 3:
-                    folder = "/".join(parts[:-2])
-            except ValueError:
-                pass
+    api = _require_api()
+    to_archive = [r[0] for r in thread_rows if r[1] != "Archive"]
+    skipped = len([r for r in thread_rows if r[1] == "Archive"])
 
-        # Skip messages already in Archive
-        if folder == "Archive":
-            if mark_as_read:
-                try:
-                    await imap.add_flags(mid, r"\Seen", folder="Archive")
-                except ImapError:
-                    pass
-            skipped += 1
-            continue
+    if not to_archive and anchor_folder == "Archive":
+        return {"status": "archived", "archived": 0, "skipped": 1, "total": 1}
 
-        try:
-            if mark_as_read:
-                try:
-                    await imap.add_flags(mid, r"\Seen", folder=folder)
-                except ImapError:
-                    pass  # Non-fatal
-            await imap.archive(mid, from_folder=folder)
-            store.optimistic_move(mid, "Archive", folder)
-            archived += 1
-        except ImapError as e:
-            logger.warning("tool.archive_thread.msg_failed", message_id=mid, error=str(e))
-            failed += 1
+    try:
+        if mark_as_read and to_archive:
+            await api.mark_read(to_archive)
+        if to_archive:
+            await api.label_messages(to_archive, "6")
+            for pm_id in to_archive:
+                _optimistic_update_folder(pm_id, "Archive")
+    except ProtonAPIError as e:
+        return {"error": "api_error", "detail": str(e)}
 
-    sync.request_reindex()
     logger.info(
         "tool.archive_thread.done",
-        message_id=message_id,
-        archived=archived,
+        archived=len(to_archive),
         skipped=skipped,
-        failed=failed,
-        total=len(messages),
+        total=len(to_archive) + skipped,
     )
     return {
         "status": "archived",
-        "archived": archived,
+        "archived": len(to_archive),
         "skipped": skipped,
-        "failed": failed,
-        "total": len(messages),
+        "total": len(to_archive) + skipped,
     }
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Sync Now"})
 async def sync_now() -> dict[str, Any]:
-    """Trigger an immediate sync (mbsync + notmuch reindex).
+    """Report current sync state from the local SQLite database.
 
-    Pushes local Maildir changes to IMAP and pulls new mail.
+    In v4, sync is event-driven (ProtonMail event loop). This tool returns
+    current database statistics rather than triggering a manual sync.
     """
     logger.info("tool.sync_now")
-    sync = _require_sync()
-    try:
-        await sync.sync()
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-    status = sync.status
+
+    row = db.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN unread=1 THEN 1 ELSE 0 END) FROM messages"
+    ).fetchone()
+    total = row[0] or 0
+    unread = row[1] or 0
+
+    unindexed = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE body_indexed = 0"
+    ).fetchone()[0]
+
+    last_event = db.sync_state.get("last_event_id")
+    initial_done = db.sync_state.get("initial_sync_done") == "1"
+
     return {
-        "status": "synced",
-        "last_sync": status.last_sync.isoformat() if status.last_sync else None,
-        "message_count": status.message_count,
+        "status": "ok",
+        "message_count": total,
+        "unread_count": unread,
+        "bodies_pending_index": unindexed,
+        "last_event_id": last_event,
+        "initial_sync_done": initial_done,
     }

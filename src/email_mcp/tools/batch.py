@@ -1,7 +1,7 @@
 """Batch tools: batch_read, batch_archive, batch_mark_read, batch_delete.
 
-Batch operations reduce MCP round-trips from O(N) to O(1) for inbox triage.
-Query-based batch tools push filtering to the server via notmuch search.
+v4: Mutations via ProtonMail native API. SQLite queried for pm_ids and
+updated optimistically. No IMAP COPY+DELETE, no notmuch.
 """
 
 import asyncio
@@ -10,76 +10,104 @@ from typing import Any
 import structlog
 
 from email_mcp.db import _row_to_message
-from email_mcp.imap import ImapError, ImapMutator
-from email_mcp.search import NotmuchError, NotmuchSearcher, translate_query
+from email_mcp.proton_api import ProtonAPIError, ProtonClient
+from email_mcp.query_builder import build_query
 from email_mcp.server import db, mcp
-from email_mcp.store import MaildirStore
-from email_mcp.sync import SyncEngine
 
 logger = structlog.get_logger()
 
-# Module-level refs — set during server lifespan
-_imap: ImapMutator | None = None
-_sync_engine: SyncEngine | None = None
-_store: MaildirStore | None = None
-_searcher: NotmuchSearcher | None = None
-
+# Module-level ref — set during server lifespan
+_api: ProtonClient | None = None
 
 _MAX_SAMPLE_SUBJECTS = 10
-# ProtonMail's API processes up to 150 messages per request, but each
-# message takes ~500ms server-side (COPY) or ~85ms (SEARCH) through Bridge.
-# We cap at 20 for quick feedback — the AI calls again for the next batch.
-_MAX_BATCH_SIZE = 20
+# ProtonMail API accepts up to 150 IDs per label/read call.
+_API_CHUNK_SIZE = 150
+# Maximum messages to affect per tool call (AI loops if more remain).
+_MAX_BATCH_SIZE = 300
 
 
-
-def _require_searcher() -> NotmuchSearcher:
-    if _searcher is None:
-        raise RuntimeError("Searcher not initialized")
-    return _searcher
-
-
-def _require_imap() -> ImapMutator:
-    if _imap is None:
-        raise RuntimeError("IMAP mutator not initialized")
-    return _imap
+def _require_api() -> ProtonClient:
+    if _api is None:
+        raise RuntimeError("ProtonMail API not initialized")
+    return _api
 
 
-def _require_sync() -> SyncEngine:
-    if _sync_engine is None:
-        raise RuntimeError("Sync engine not initialized")
-    return _sync_engine
+def _lookup_pm_ids(message_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Map RFC 2822 Message-IDs or pm_ids → pm_ids via SQLite.
+
+    Returns (found_pm_ids, not_found_message_ids).
+    """
+    found: list[str] = []
+    not_found: list[str] = []
+    for mid in message_ids:
+        row = db.execute(
+            "SELECT pm_id FROM messages WHERE message_id = ? OR pm_id = ?",
+            [mid, mid],
+        ).fetchone()
+        if row:
+            found.append(row[0])
+        else:
+            not_found.append(mid)
+    return found, not_found
 
 
-def _require_store() -> MaildirStore:
-    if _store is None:
-        raise RuntimeError("Store not initialized")
-    return _store
+async def _api_label_chunks(pm_ids: list[str], label_id: str) -> tuple[int, list[str]]:
+    """Call label_messages in chunks of _API_CHUNK_SIZE. Returns (succeeded, failed_pm_ids)."""
+    api = _require_api()
+    succeeded = 0
+    failed: list[str] = []
+    for i in range(0, len(pm_ids), _API_CHUNK_SIZE):
+        chunk = pm_ids[i : i + _API_CHUNK_SIZE]
+        try:
+            await api.label_messages(chunk, label_id)
+            succeeded += len(chunk)
+        except ProtonAPIError as e:
+            logger.warning("batch.label_chunk.failed", label=label_id, error=str(e))
+            failed.extend(chunk)
+    return succeeded, failed
 
 
-def _email_to_dict(email) -> dict[str, Any]:
-    """Convert a MessageRow to the same dict shape as read_email."""
-    body = db.bodies.get(email.pm_id) or ""
-    return {
-        "message_id": email.message_id,
-        "pm_id": email.pm_id,
-        "from": f"{email.sender_name} <{email.sender_email}>" if email.sender_name else email.sender_email,
-        "to": email.recipients,
-        "subject": email.subject,
-        "date": email.date,
-        "body": body,
-        "folder": email.folder,
-        "unread": email.unread,
-        "has_attachments": email.has_attachments,
-    }
+async def _api_mark_read_chunks(pm_ids: list[str]) -> tuple[int, list[str]]:
+    """Call mark_read in chunks of _API_CHUNK_SIZE. Returns (succeeded, failed_pm_ids)."""
+    api = _require_api()
+    succeeded = 0
+    failed: list[str] = []
+    for i in range(0, len(pm_ids), _API_CHUNK_SIZE):
+        chunk = pm_ids[i : i + _API_CHUNK_SIZE]
+        try:
+            await api.mark_read(chunk)
+            succeeded += len(chunk)
+        except ProtonAPIError as e:
+            logger.warning("batch.mark_read_chunk.failed", error=str(e))
+            failed.extend(chunk)
+    return succeeded, failed
+
+
+def _optimistic_update_folder(pm_ids: list[str], folder: str) -> None:
+    from email_mcp.tools.managing import _FOLDER_TO_LABEL
+    label_id = _FOLDER_TO_LABEL.get(folder, "")
+    for pm_id in pm_ids:
+        db.execute(
+            "UPDATE messages SET folder = ?, label_ids = ?, updated_at = unixepoch() WHERE pm_id = ?",
+            [folder, f'["{label_id}"]', pm_id],
+        )
+    db.commit()
+
+
+def _optimistic_mark_read(pm_ids: list[str]) -> None:
+    for pm_id in pm_ids:
+        db.execute(
+            "UPDATE messages SET unread = 0, updated_at = unixepoch() WHERE pm_id = ?",
+            [pm_id],
+        )
+    db.commit()
+
+
+# ── Batch read ────────────────────────────────────────────────────────────────
 
 
 @mcp.tool(
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "title": "Batch Read Emails",
-    }
+    annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Batch Read Emails"}
 )
 async def batch_read(
     message_ids: list[str], folder: str | None = None
@@ -90,8 +118,8 @@ async def batch_read(
     {"error": ..., "message_id": ...} entries for any that couldn't be found.
 
     Args:
-        message_ids: List of Message-ID header values to read
-        folder: Optional folder hint to speed up lookup
+        message_ids: List of Message-ID header values (or pm_ids) to read
+        folder: Ignored in v4
     """
     logger.info("tool.batch_read", count=len(message_ids))
     if not message_ids:
@@ -108,99 +136,81 @@ async def batch_read(
                 "message_id": message_id,
                 "detail": "Message not found in local database.",
             }
-        return _email_to_dict(_row_to_message(row))
+        msg = _row_to_message(row)
+        body = db.bodies.get(msg.pm_id) or ""
+        return {
+            "message_id": msg.message_id,
+            "pm_id": msg.pm_id,
+            "from": f"{msg.sender_name} <{msg.sender_email}>" if msg.sender_name else msg.sender_email,
+            "to": msg.recipients,
+            "subject": msg.subject,
+            "date": msg.date,
+            "body": body,
+            "folder": msg.folder,
+            "unread": msg.unread,
+            "has_attachments": msg.has_attachments,
+        }
 
     results = await asyncio.gather(*[_read_one(mid) for mid in message_ids])
     logger.info("tool.batch_read.done", count=len(results))
     return list(results)
 
 
-@mcp.tool(
-    annotations={"destructiveHint": False, "title": "Batch Archive Emails"}
-)
+# ── Batch mutations (by explicit Message-ID list) ─────────────────────────────
+
+
+@mcp.tool(annotations={"destructiveHint": False, "title": "Batch Archive Emails"})
 async def batch_archive(
     message_ids: list[str], folder: str = "INBOX"
 ) -> dict[str, Any]:
     """Archive multiple emails by Message-ID.
 
     For bulk operations (e.g. archiving all newsletters), prefer
-    search_and_archive which takes a query and doesn't require listing IDs.
+    search_and_archive which takes a query instead of requiring listing IDs.
 
     Args:
-        message_ids: List of Message-ID header values to archive
-        folder: Folder the emails are in (required for fast IMAP lookup)
+        message_ids: List of Message-ID header values (or pm_ids) to archive
+        folder: Ignored in v4
     """
-    logger.info("tool.batch_archive", count=len(message_ids), folder=folder)
-    total = len(message_ids)
+    logger.info("tool.batch_archive", count=len(message_ids))
     message_ids = message_ids[:_MAX_BATCH_SIZE]
-    imap = _require_imap()
-    local_store = _require_store()
-    sync = _require_sync()
+    pm_ids, not_found = _lookup_pm_ids(message_ids)
 
-    try:
-        succeeded, errors = await imap.batch_archive(message_ids, from_folder=folder)
-    except (ImapError, Exception) as e:
-        logger.error("tool.batch_archive.imap_failed", error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+    succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "6")
+    _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Archive")
 
-    for mid in message_ids:
-        if not any(e["message_id"] == mid for e in errors):
-            local_store.optimistic_move(mid, "Archive", folder)
-
-    remaining = total - len(message_ids)
-    sync.request_reindex()
+    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
+    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_archive.done", succeeded=succeeded, failed=len(errors))
-    return {
-        "status": "completed",
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
+    return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 
 
-@mcp.tool(
-    annotations={"destructiveHint": False, "title": "Batch Mark Read"}
-)
+@mcp.tool(annotations={"destructiveHint": False, "title": "Batch Mark Read"})
 async def batch_mark_read(
     message_ids: list[str], folder: str | None = None
 ) -> dict[str, Any]:
-    r"""Mark multiple emails as read by Message-ID.
+    """Mark multiple emails as read by Message-ID.
 
-    For bulk operations (e.g. marking all newsletters read), prefer
-    search_and_mark_read which takes a query and doesn't require listing IDs.
+    For bulk operations prefer search_and_mark_read which takes a query.
 
     Args:
-        message_ids: List of Message-ID header values to mark as read
-        folder: Current folder hint (optional)
+        message_ids: List of Message-ID header values (or pm_ids) to mark as read
+        folder: Ignored in v4
     """
-    logger.info("tool.batch_mark_read", count=len(message_ids), folder=folder)
-    total = len(message_ids)
+    logger.info("tool.batch_mark_read", count=len(message_ids))
     message_ids = message_ids[:_MAX_BATCH_SIZE]
-    imap = _require_imap()
+    pm_ids, not_found = _lookup_pm_ids(message_ids)
 
-    try:
-        succeeded, errors = await imap.batch_add_flags(
-            message_ids, r"\Seen", folder=folder
-        )
-    except (ImapError, Exception) as e:
-        logger.error("tool.batch_mark_read.imap_failed", error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+    succeeded, failed_pm_ids = await _api_mark_read_chunks(pm_ids)
+    _optimistic_mark_read([p for p in pm_ids if p not in failed_pm_ids])
 
-    remaining = total - len(message_ids)
+    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
+    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_mark_read.done", succeeded=succeeded, failed=len(errors))
-    return {
-        "status": "completed",
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
+    return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 
 
-@mcp.tool(
-    annotations={"destructiveHint": True, "title": "Batch Delete Emails"}
-)
+@mcp.tool(annotations={"destructiveHint": True, "title": "Batch Delete Emails"})
 async def batch_delete(
     message_ids: list[str],
     confirm: bool = False,
@@ -208,312 +218,163 @@ async def batch_delete(
 ) -> dict[str, Any]:
     """Delete multiple emails by Message-ID (moves to Trash).
 
-    For bulk operations (e.g. deleting all spam), prefer search_and_delete
-    which takes a query and doesn't require listing IDs.
-
-    Requires confirm=True to execute. Returns an error if confirm is False.
+    For bulk operations prefer search_and_delete which takes a query.
+    Requires confirm=True to execute.
 
     Args:
-        message_ids: List of Message-ID header values to delete
+        message_ids: List of Message-ID header values (or pm_ids) to delete
         confirm: Must be True to proceed with deletion
-        folder: Current folder hint (optional)
+        folder: Ignored in v4
     """
     logger.info("tool.batch_delete", count=len(message_ids), confirm=confirm)
-    total = len(message_ids)
-    message_ids = message_ids[:_MAX_BATCH_SIZE]
     if not confirm:
         return {
             "error": "confirmation_required",
             "detail": "Set confirm=True to delete these messages.",
-            "message_ids": message_ids,
         }
 
-    imap = _require_imap()
-    local_store = _require_store()
-    sync = _require_sync()
+    message_ids = message_ids[:_MAX_BATCH_SIZE]
+    pm_ids, not_found = _lookup_pm_ids(message_ids)
 
-    try:
-        succeeded, errors = await imap.batch_delete(message_ids, from_folder=folder)
-    except (ImapError, Exception) as e:
-        logger.error("tool.batch_delete.imap_failed", error=str(e))
-        return {"error": "imap_error", "detail": str(e)}
+    succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "3")
+    _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Trash")
 
-    for mid in message_ids:
-        if not any(e["message_id"] == mid for e in errors):
-            local_store.optimistic_move(mid, "Trash", folder)
-
-    remaining = total - len(message_ids)
-    sync.request_reindex()
+    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
+    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_delete.done", succeeded=succeeded, failed=len(errors))
-    return {
-        "status": "completed",
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
+    return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 
 
-# ── Query-based batch operations ─────────────────────────────────────
+# ── Query-based batch operations ──────────────────────────────────────────────
 
-
-async def _search_to_folder_groups(
+def _query_to_pm_ids(
     query: str,
-) -> tuple[dict[str, list[str]], list[dict[str, str]]]:
-    """Run notmuch search and group results by folder.
-
-    Returns:
-        (ids_by_folder, results_as_dicts) where ids_by_folder is
-        {folder: [message_id, ...]} and results_as_dicts has subject info
-        for dry-run reporting.
-    """
-    searcher = _require_searcher()
-    translated = translate_query(query)
-    results = await searcher.search(translated)
-
-    # "All Mail" is a virtual folder containing every message — searching it
-    # via IMAP is ~100x slower than real folders. Filter it out; every message
-    # in "All Mail" also exists in a real folder.
-    _SKIP_FOLDERS = {"All Mail"}
-
-    ids_by_folder: dict[str, list[str]] = {}
-    for r in results:
-        folders = [f for f in r.folders if f not in _SKIP_FOLDERS] or r.folders or ["INBOX"]
-        for folder in folders:
-            ids_by_folder.setdefault(folder, []).append(r.message_id)
-
-    return ids_by_folder, [
-        {"message_id": r.message_id, "folders": r.folders, "subject": r.subject}
-        for r in results
-    ]
-
-
-def _truncate_to_batch_size(
-    ids_by_folder: dict[str, list[str]],
-    results: list[dict[str, Any]],
-) -> tuple[dict[str, list[str]], list[dict[str, Any]], int]:
-    """Truncate results to _MAX_BATCH_SIZE, preserving folder grouping.
-
-    Returns (truncated_ids_by_folder, truncated_results, total_before_truncation).
-    """
-    total = len(results)
-    if total <= _MAX_BATCH_SIZE:
-        return ids_by_folder, results, total
-
-    # Take the first _MAX_BATCH_SIZE results
-    kept = results[:_MAX_BATCH_SIZE]
-    kept_ids = {r["message_id"] for r in kept}
-
-    truncated: dict[str, list[str]] = {}
-    for folder, mids in ids_by_folder.items():
-        filtered = [mid for mid in mids if mid in kept_ids]
-        if filtered:
-            truncated[folder] = filtered
-
-    return truncated, kept, total
-
-
-def _dry_run_response(
-    results: list[dict[str, Any]],
-    ids_by_folder: dict[str, list[str]],
-) -> dict[str, Any]:
-    """Build a dry-run response with count, sample subjects, and folder breakdown."""
-    subjects = [r["subject"] for r in results if r.get("subject")]
-    by_folder = {folder: len(ids) for folder, ids in sorted(ids_by_folder.items())}
-    return {
-        "would_affect": len(results),
-        "sample_subjects": subjects[:_MAX_SAMPLE_SUBJECTS],
-        "by_folder": by_folder,
-    }
-
-
-async def _execute_query_batch(
-    tool_name: str,
-    ids_by_folder: dict[str, list[str]],
-    results: list[dict[str, Any]],
-    imap_op: Any,
-    move_target: str | None = None,
-    skip_source_folders: set[str] | None = None,
-) -> dict[str, Any]:
-    """Shared execution path for all query-based batch tools.
-
-    Truncates to batch size, runs the given IMAP operation, applies optimistic
-    local moves (if move_target is set), guards against infinite loops when the
-    batch makes zero progress, and requests a reindex.
+    skip_folder: str | None = None,
+    limit: int = _MAX_BATCH_SIZE,
+) -> tuple[list[str], list[str], int]:
+    """Run Gmail-style query against SQLite, return (pm_ids, subjects, total_matched).
 
     Args:
-        tool_name: Used for structured log keys.
-        ids_by_folder: Folder-grouped message IDs from _search_to_folder_groups.
-        results: Flat result list (same messages, for batch-size tracking).
-        imap_op: Async callable(ids_by_folder) → (succeeded, errors).
-        move_target: If set, apply optimistic local moves to this folder.
-        skip_source_folders: Source folders to exclude before operating
-            (e.g. {"Trash"} for delete, to avoid Trash→Trash COPY).
+        query: Gmail-style query string
+        skip_folder: Exclude messages in this folder (e.g. "Trash" for search_and_delete)
+        limit: Max results to return (for batching)
     """
-    if skip_source_folders:
-        ids_by_folder = {
-            f: ids for f, ids in ids_by_folder.items()
-            if f not in skip_source_folders
-        }
+    parsed = build_query(query)
 
-    if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
+    # Count total matching (without limit) for dry_run
+    count_sql, count_params = parsed.to_sql(limit=10_000, offset=0)
+    all_rows = db.execute(count_sql, count_params).fetchall()
+    if skip_folder:
+        all_rows = [r for r in all_rows if r["folder"] != skip_folder]
 
-    ids_by_folder, results, total = _truncate_to_batch_size(ids_by_folder, results)
+    total = len(all_rows)
+    batch = all_rows[:limit]
 
-    succeeded, errors = await imap_op(ids_by_folder)
-
-    if move_target:
-        local_store = _require_store()
-        failed_ids = {e["message_id"] for e in errors}
-        for r in results:
-            if r["message_id"] not in failed_ids:
-                for folder in r["folders"] or ["INBOX"]:
-                    local_store.optimistic_move(r["message_id"], move_target, folder)
-        _require_sync().request_reindex()
-
-    remaining = total - len(results)
-    # Zero-progress guard: stale notmuch entries that don't exist in IMAP
-    # would loop forever. Stop and let the next sync clean up the index.
-    if succeeded == 0 and errors:
-        remaining = 0
-
-    logger.info(
-        f"tool.{tool_name}.done",
-        succeeded=succeeded,
-        failed=len(errors),
-        remaining=remaining,
-    )
-    return {
-        "succeeded": succeeded,
-        "failed": len(errors),
-        "errors": errors,
-        "remaining": remaining,
-    }
+    pm_ids = [r["pm_id"] for r in batch]
+    subjects = [r["subject"] or "" for r in batch]
+    return pm_ids, subjects, total
 
 
-@mcp.tool(
-    annotations={"destructiveHint": False, "title": "Search and Mark Read"}
-)
-async def search_and_mark_read(
-    query: str, dry_run: bool = True
-) -> dict[str, Any]:
+@mcp.tool(annotations={"destructiveHint": False, "title": "Search and Mark Read"})
+async def search_and_mark_read(query: str, dry_run: bool = True) -> dict[str, Any]:
     """Mark all emails matching a search query as read.
 
-    Preferred over batch_mark_read for bulk operations — takes a query
-    instead of requiring individual Message-IDs.
-
-    Workflow: call with dry_run=True first to preview (returns count,
-    sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Processes up to {batch_size} messages per call. If more match, the response
-    includes "remaining" — call again with the same query to continue.
+    Workflow: call with dry_run=True first to preview (count + sample subjects),
+    then dry_run=False to execute. Calls again with the same query if remaining > 0.
 
     Args:
-        query: Gmail-style search query (e.g. "from:newsletter", "is:unread in:inbox")
-        dry_run: If True (default), preview what would be affected without acting
+        query: Gmail-style search query (e.g. "from:newsletter is:unread")
+        dry_run: If True (default), preview without acting
     """
     logger.info("tool.search_and_mark_read", query=query, dry_run=dry_run)
     try:
-        ids_by_folder, results = await _search_to_folder_groups(query)
-    except (NotmuchError, Exception) as e:
-        logger.error("tool.search_and_mark_read.search_failed", error=str(e))
-        return {"error": "search_failed", "detail": str(e)}
+        pm_ids, subjects, total = _query_to_pm_ids(query)
+    except Exception as e:
+        return {"error": "query_failed", "detail": str(e)}
 
     if dry_run:
-        return _dry_run_response(results, ids_by_folder)
+        return {
+            "would_affect": total,
+            "sample_subjects": subjects[:_MAX_SAMPLE_SUBJECTS],
+        }
 
-    imap = _require_imap()
-    return await _execute_query_batch(
-        "search_and_mark_read",
-        ids_by_folder,
-        results,
-        imap_op=lambda g: imap.batch_add_flags_by_folder(g, [r"\Seen"]),
-    )
+    succeeded, failed_pm_ids = await _api_mark_read_chunks(pm_ids)
+    _optimistic_mark_read([p for p in pm_ids if p not in failed_pm_ids])
+
+    remaining = max(0, total - len(pm_ids))
+    logger.info("tool.search_and_mark_read.done", succeeded=succeeded, remaining=remaining)
+    return {
+        "succeeded": succeeded,
+        "failed": len(failed_pm_ids),
+        "remaining": remaining,
+    }
 
 
-@mcp.tool(
-    annotations={"destructiveHint": False, "title": "Search and Archive"}
-)
-async def search_and_archive(
-    query: str, dry_run: bool = True
-) -> dict[str, Any]:
+@mcp.tool(annotations={"destructiveHint": False, "title": "Search and Archive"})
+async def search_and_archive(query: str, dry_run: bool = True) -> dict[str, Any]:
     """Archive all emails matching a search query.
 
-    Preferred over batch_archive for bulk operations — takes a query
-    instead of requiring individual Message-IDs.
-
-    Workflow: call with dry_run=True first to preview (returns count,
-    sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Processes up to {batch_size} messages per call. If more match, the response
-    includes "remaining" — call again with the same query to continue.
+    Workflow: call with dry_run=True first to preview (count + sample subjects),
+    then dry_run=False to execute. Calls again with the same query if remaining > 0.
 
     Args:
-        query: Gmail-style search query (e.g. "from:newsletter", "older_than:30d")
-        dry_run: If True (default), preview what would be affected without acting
+        query: Gmail-style search query (e.g. "from:newsletter older_than:30d")
+        dry_run: If True (default), preview without acting
     """
     logger.info("tool.search_and_archive", query=query, dry_run=dry_run)
     try:
-        ids_by_folder, results = await _search_to_folder_groups(query)
-    except (NotmuchError, Exception) as e:
-        logger.error("tool.search_and_archive.search_failed", error=str(e))
-        return {"error": "search_failed", "detail": str(e)}
+        pm_ids, subjects, total = _query_to_pm_ids(query)
+    except Exception as e:
+        return {"error": "query_failed", "detail": str(e)}
 
     if dry_run:
-        return _dry_run_response(results, ids_by_folder)
+        return {
+            "would_affect": total,
+            "sample_subjects": subjects[:_MAX_SAMPLE_SUBJECTS],
+        }
 
-    imap = _require_imap()
-    return await _execute_query_batch(
-        "search_and_archive",
-        ids_by_folder,
-        results,
-        imap_op=lambda g: imap.batch_move_by_folder(g, "Archive"),
-        move_target="Archive",
-    )
+    succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "6")
+    _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Archive")
+
+    remaining = max(0, total - len(pm_ids))
+    logger.info("tool.search_and_archive.done", succeeded=succeeded, remaining=remaining)
+    return {
+        "succeeded": succeeded,
+        "failed": len(failed_pm_ids),
+        "remaining": remaining,
+    }
 
 
-@mcp.tool(
-    annotations={"destructiveHint": True, "title": "Search and Delete"}
-)
-async def search_and_delete(
-    query: str, dry_run: bool = True
-) -> dict[str, Any]:
+@mcp.tool(annotations={"destructiveHint": True, "title": "Search and Delete"})
+async def search_and_delete(query: str, dry_run: bool = True) -> dict[str, Any]:
     """Delete all emails matching a search query (move to Trash).
 
-    Preferred over batch_delete for bulk operations — takes a query
-    instead of requiring individual Message-IDs.
-
-    Workflow: call with dry_run=True first to preview (returns count,
-    sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Processes up to {batch_size} messages per call. If more match, the response
-    includes "remaining" — call again with the same query to continue.
+    Workflow: call with dry_run=True first to preview (count + sample subjects),
+    then dry_run=False to execute. Calls again with the same query if remaining > 0.
 
     Args:
-        query: Gmail-style search query (e.g. "from:spam", "subject:unsubscribe")
-        dry_run: If True (default), preview what would be affected without acting
+        query: Gmail-style search query (e.g. "from:spam subject:unsubscribe")
+        dry_run: If True (default), preview without acting
     """
     logger.info("tool.search_and_delete", query=query, dry_run=dry_run)
     try:
-        ids_by_folder, results = await _search_to_folder_groups(query)
-    except (NotmuchError, Exception) as e:
-        logger.error("tool.search_and_delete.search_failed", error=str(e))
-        return {"error": "search_failed", "detail": str(e)}
+        pm_ids, subjects, total = _query_to_pm_ids(query, skip_folder="Trash")
+    except Exception as e:
+        return {"error": "query_failed", "detail": str(e)}
 
     if dry_run:
-        return _dry_run_response(results, ids_by_folder)
+        return {
+            "would_affect": total,
+            "sample_subjects": subjects[:_MAX_SAMPLE_SUBJECTS],
+        }
 
-    imap = _require_imap()
-    return await _execute_query_batch(
-        "search_and_delete",
-        ids_by_folder,
-        results,
-        imap_op=lambda g: imap.batch_move_by_folder(g, "Trash"),
-        move_target="Trash",
-        # Messages already in Trash: Trash→Trash COPY rejected by Bridge (Code=2501)
-        skip_source_folders={"Trash"},
-    )
+    succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "3")
+    _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Trash")
 
-
-# Interpolate batch size into docstrings so it's defined in one place
-for _fn in (search_and_mark_read, search_and_archive, search_and_delete):
-    if _fn.__doc__:
-        _fn.__doc__ = _fn.__doc__.format(batch_size=_MAX_BATCH_SIZE)
+    remaining = max(0, total - len(pm_ids))
+    logger.info("tool.search_and_delete.done", succeeded=succeeded, remaining=remaining)
+    return {
+        "succeeded": succeeded,
+        "failed": len(failed_pm_ids),
+        "remaining": remaining,
+    }
