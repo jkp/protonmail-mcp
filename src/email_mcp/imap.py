@@ -6,6 +6,7 @@ aioimaplib lacks STARTTLS support which ProtonMail Bridge requires.
 
 import asyncio
 import ssl
+import time
 
 import structlog
 from imapclient import IMAPClient
@@ -249,19 +250,42 @@ class ImapMutator:
             normalized = message_id.strip().strip("<>")
             remaining[message_id] = f"<{normalized}>".encode()
 
+        t0 = time.monotonic()
+        total_searches = 0
+
         # Iterate folders in outer loop: O(F) SELECTs instead of O(N*F)
         for f in folders:
             if not remaining:
                 break
             self._client.select_folder(f, readonly=True)
+            folder_found = 0
             for message_id, encoded_id in list(remaining.items()):
                 criteria = [b"HEADER", b"Message-ID", encoded_id]
                 uids = self._client.search(criteria)
+                total_searches += 1
                 if uids:
                     uids_by_folder.setdefault(f, []).append(
                         (message_id, uids[0])
                     )
                     del remaining[message_id]
+                    folder_found += 1
+            if folder_found:
+                logger.debug(
+                    "imap.uid_resolve_folder",
+                    folder=f,
+                    found=folder_found,
+                    searched=folder_found + len(remaining),
+                )
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "imap.uid_resolve_done",
+            total=len(message_ids),
+            resolved=len(message_ids) - len(remaining),
+            not_found=len(remaining),
+            searches=total_searches,
+            elapsed_s=round(elapsed, 2),
+        )
 
         location = folder if folder else "any folder"
         for message_id in remaining:
@@ -315,15 +339,23 @@ class ImapMutator:
             msg_ids = [mid for mid, _ in entries]
             try:
                 self._client.select_folder(folder)
+                t0 = time.monotonic()
                 self._client.copy(uids, to_folder)
+                t_copy = time.monotonic() - t0
                 self._client.delete_messages(uids)
+                t_delete = time.monotonic() - t0 - t_copy
                 self._client.expunge(uids)
+                t_expunge = time.monotonic() - t0 - t_copy - t_delete
                 succeeded += len(entries)
                 logger.info(
                     "imap.batch_moved",
                     count=len(entries),
                     from_folder=folder,
                     to_folder=to_folder,
+                    copy_s=round(t_copy, 2),
+                    delete_s=round(t_delete, 2),
+                    expunge_s=round(t_expunge, 2),
+                    total_s=round(time.monotonic() - t0, 2),
                 )
             except Exception as e:
                 for mid in msg_ids:
@@ -349,13 +381,16 @@ class ImapMutator:
             msg_ids = [mid for mid, _ in entries]
             try:
                 self._client.select_folder(folder)
+                t0 = time.monotonic()
                 self._client.add_flags(uids, flags)
+                elapsed = time.monotonic() - t0
                 succeeded += len(entries)
                 logger.info(
                     "imap.batch_flags_added",
                     count=len(entries),
                     folder=folder,
                     flags=flags,
+                    elapsed_s=round(elapsed, 2),
                 )
             except Exception as e:
                 for mid in msg_ids:
@@ -430,6 +465,15 @@ class ImapMutator:
         groups if it exists in multiple folders (e.g. self-sent emails).
         Returns (succeeded, errors) with reasons.
         """
+        t_start = time.monotonic()
+        total_messages = sum(len(ids) for ids in message_ids_by_folder.values())
+        logger.info(
+            "imap.batch_move_by_folder.start",
+            folders=list(message_ids_by_folder.keys()),
+            total_messages=total_messages,
+            to_folder=to_folder,
+        )
+
         await self._ensure_connected()
         all_uids: dict[str, list[tuple[str, int]]] = {}
         all_errors: list[dict] = []
@@ -448,6 +492,13 @@ class ImapMutator:
         succeeded, move_errors = await asyncio.to_thread(
             self._batch_move_sync, all_uids, to_folder
         )
+
+        logger.info(
+            "imap.batch_move_by_folder.done",
+            succeeded=succeeded,
+            failed=len(all_errors) + len(move_errors),
+            total_s=round(time.monotonic() - t_start, 2),
+        )
         return succeeded, all_errors + move_errors
 
     async def batch_add_flags_by_folder(
@@ -462,6 +513,15 @@ class ImapMutator:
         groups if it exists in multiple folders (e.g. self-sent emails).
         Returns (succeeded, errors) with reasons.
         """
+        t_start = time.monotonic()
+        total_messages = sum(len(ids) for ids in message_ids_by_folder.values())
+        logger.info(
+            "imap.batch_add_flags_by_folder.start",
+            folders=list(message_ids_by_folder.keys()),
+            total_messages=total_messages,
+            flags=flags,
+        )
+
         await self._ensure_connected()
         all_uids: dict[str, list[tuple[str, int]]] = {}
         all_errors: list[dict] = []
@@ -479,5 +539,12 @@ class ImapMutator:
 
         succeeded, flag_errors = await asyncio.to_thread(
             self._batch_add_flags_sync, all_uids, flags
+        )
+
+        logger.info(
+            "imap.batch_add_flags_by_folder.done",
+            succeeded=succeeded,
+            failed=len(all_errors) + len(flag_errors),
+            total_s=round(time.monotonic() - t_start, 2),
         )
         return succeeded, all_errors + flag_errors
