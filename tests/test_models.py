@@ -38,12 +38,13 @@ def test_folder():
 def test_search_result():
     result = SearchResult(
         message_id="<test@example.com>",
-        folder="INBOX",
+        folders=["INBOX"],
         subject="Test",
         tags={"unread", "inbox"},
     )
     assert result.message_id == "<test@example.com>"
     assert "unread" in result.tags
+    assert result.folders == ["INBOX"]
 
 
 def test_sync_status_defaults():

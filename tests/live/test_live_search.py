@@ -25,7 +25,7 @@ class TestSearch:
             pytest.skip("No search results to validate")
         for item in data:
             assert "message_id" in item
-            assert "folder" in item
+            assert "folders" in item
             assert "subject" in item
             assert "date" in item
             assert "authors" in item
@@ -51,7 +51,7 @@ class TestSearchReadBack:
         failures = []
         for item in inbox_search_results:
             mid = item["message_id"]
-            folder = item["folder"]
+            folder = item["folders"][0] if item.get("folders") else ""
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -73,7 +73,7 @@ class TestSearchReadBack:
         mismatches = []
         for item in inbox_search_results:
             mid = item["message_id"]
-            folder = item["folder"]
+            folder = item["folders"][0] if item.get("folders") else ""
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -103,7 +103,7 @@ class TestSearchAcrossFolders:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folder"]
+            folder = item["folders"][0] if item.get("folders") else ""
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -127,7 +127,7 @@ class TestSearchAcrossFolders:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folder"]
+            folder = item["folders"][0] if item.get("folders") else ""
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -158,7 +158,7 @@ class TestSearchAttachmentPipeline:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folder"]
+            folder = item["folders"][0] if item.get("folders") else ""
             try:
                 att_result = await live_client.call_tool(
                     "list_attachments", {"message_id": mid, "folder": folder}

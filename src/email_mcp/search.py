@@ -219,26 +219,32 @@ class NotmuchSearcher:
             headers = msg.get("headers", {})
             tags = set(msg.get("tags", []))
 
-            # Extract folder from filename
+            # Extract folders from all filenames
             filenames = msg.get("filename", [])
-            folder = ""
+            folders: list[str] = []
             if filenames and self.maildir_root:
                 from pathlib import Path
 
-                filepath = filenames[0]
-                try:
-                    relative = Path(filepath).relative_to(self.maildir_root)
-                    parts = relative.parts
-                    if len(parts) >= 3:
-                        folder = "/".join(parts[:-2])
-                    elif parts:
-                        folder = parts[0]
-                except ValueError:
-                    pass
+                seen: set[str] = set()
+                for filepath in filenames:
+                    try:
+                        relative = Path(filepath).relative_to(self.maildir_root)
+                        parts = relative.parts
+                        if len(parts) >= 3:
+                            folder = "/".join(parts[:-2])
+                        elif parts:
+                            folder = parts[0]
+                        else:
+                            continue
+                        if folder not in seen:
+                            seen.add(folder)
+                            folders.append(folder)
+                    except ValueError:
+                        pass
 
             results.append(SearchResult(
                 message_id=message_id,
-                folder=folder,
+                folders=folders,
                 subject=headers.get("Subject", ""),
                 date=headers.get("Date", ""),
                 authors=headers.get("From", ""),

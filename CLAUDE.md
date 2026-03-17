@@ -20,6 +20,12 @@ uv run email-mcp           # start server (stdio)
 - **Message-ID** identifies emails (not IMAP UIDs)
 - **FastMCP** server with 14 tools, stdio or HTTP transport
 
+### Critical invariants (see [docs/data-flow-invariants.md](docs/data-flow-invariants.md))
+
+- **All mutations MUST go through IMAP.** Never modify Maildir files directly to mutate state -- it creates split-brain between IMAP server, mbsync, and notmuch.
+- **notmuch is a search accelerator, not a source of truth.** Folder info derived from file paths can be stale. Handle misses gracefully.
+- **Test cleanup MUST use IMAP path** (`search_and_delete`), not direct file deletion.
+
 ## Key Modules
 
 | Module | Purpose |

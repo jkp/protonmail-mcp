@@ -128,7 +128,8 @@ async def poll_for_email(
         result = await client.call_tool(
             "list_emails", {"folder": folder, "limit": 50}
         )
-        emails = _parse_result(result)
+        data = _parse_result(result)
+        emails = data.get("emails", []) if isinstance(data, dict) else data
         for email in emails:
             if email.get("subject") == subject:
                 return email

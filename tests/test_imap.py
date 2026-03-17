@@ -238,7 +238,7 @@ class TestBatchMoveSync:
             )
         assert succeeded == 0
         assert len(errors) == 1
-        assert "not found" in errors[0]["detail"].lower()
+        assert "not found" in errors[0]["reason"].lower()
 
 
 class TestBatchAddFlagsSync:
@@ -297,6 +297,82 @@ class TestBatchDelete:
         mock_client.copy.assert_called_once()
         # Verify destination is Trash
         assert mock_client.copy.call_args[0][1] == "Trash"
+
+
+class TestBatchMoveByFolder:
+    async def test_moves_with_preresolved_folders(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(side_effect=[[42], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move_by_folder(
+                {"INBOX": ["<msg1@example.com>", "<msg2@example.com>"]},
+                "Archive",
+            )
+        assert succeeded == 2
+        assert errors == []
+        mock_client.copy.assert_called_once()
+        assert mock_client.copy.call_args[0][1] == "Archive"
+
+    async def test_handles_multiple_folders(self, mutator):
+        mock_client = _mock_imapclient()
+        # INBOX: find msg1 (uid 42), Sent: find msg2 (uid 99)
+        mock_client.search = MagicMock(side_effect=[[42], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move_by_folder(
+                {
+                    "INBOX": ["<msg1@example.com>"],
+                    "Sent": ["<msg2@example.com>"],
+                },
+                "Archive",
+            )
+        assert succeeded == 2
+        assert errors == []
+        assert mock_client.copy.call_count == 2
+
+    async def test_not_found_returns_error_with_reason(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(side_effect=[[42], []])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_move_by_folder(
+                {"INBOX": ["<msg1@example.com>", "<missing@example.com>"]},
+                "Archive",
+            )
+        assert succeeded == 1
+        assert len(errors) == 1
+        assert errors[0]["message_id"] == "<missing@example.com>"
+        assert "INBOX" in errors[0]["reason"]
+
+
+class TestBatchAddFlagsByFolder:
+    async def test_adds_flags_with_preresolved_folders(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(side_effect=[[42], [99]])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_add_flags_by_folder(
+                {"INBOX": ["<msg1@example.com>", "<msg2@example.com>"]},
+                [r"\Seen"],
+            )
+        assert succeeded == 2
+        assert errors == []
+        mock_client.add_flags.assert_called_once()
+
+    async def test_not_found_returns_error_with_reason(self, mutator):
+        mock_client = _mock_imapclient()
+        mock_client.search = MagicMock(side_effect=[[42], []])
+        with patch("email_mcp.imap.IMAPClient", return_value=mock_client):
+            await mutator.connect()
+            succeeded, errors = await mutator.batch_add_flags_by_folder(
+                {"INBOX": ["<msg1@example.com>", "<missing@example.com>"]},
+                [r"\Seen"],
+            )
+        assert succeeded == 1
+        assert len(errors) == 1
+        assert errors[0]["message_id"] == "<missing@example.com>"
+        assert "INBOX" in errors[0]["reason"]
 
 
 class TestAutoReconnect:

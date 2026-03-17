@@ -263,9 +263,10 @@ class ImapMutator:
                     )
                     del remaining[message_id]
 
+        location = folder if folder else "any folder"
         for message_id in remaining:
             errors.append(
-                {"message_id": message_id, "detail": "Message not found"}
+                {"message_id": message_id, "reason": f"not found in {location}"}
             )
 
         return uids_by_folder, errors
@@ -326,7 +327,7 @@ class ImapMutator:
                 )
             except Exception as e:
                 for mid in msg_ids:
-                    errors.append({"message_id": mid, "detail": str(e)})
+                    errors.append({"message_id": mid, "reason": str(e)})
 
         return succeeded, errors
 
@@ -358,7 +359,7 @@ class ImapMutator:
                 )
             except Exception as e:
                 for mid in msg_ids:
-                    errors.append({"message_id": mid, "detail": str(e)})
+                    errors.append({"message_id": mid, "reason": str(e)})
 
         return succeeded, errors
 
@@ -414,3 +415,69 @@ class ImapMutator:
             self._batch_add_flags_sync, uids_by_folder, flag_list
         )
         return succeeded, find_errors + flag_errors
+
+    # ── Pre-grouped batch operations (query-based) ────────────────────
+
+    async def batch_move_by_folder(
+        self,
+        message_ids_by_folder: dict[str, list[str]],
+        to_folder: str,
+    ) -> tuple[int, list[dict]]:
+        """Batch move with pre-resolved folders.
+
+        Accepts {folder: [message_id, ...]} so each group only searches
+        one IMAP folder (fast). A message may appear in multiple folder
+        groups if it exists in multiple folders (e.g. self-sent emails).
+        Returns (succeeded, errors) with reasons.
+        """
+        await self._ensure_connected()
+        all_uids: dict[str, list[tuple[str, int]]] = {}
+        all_errors: list[dict] = []
+
+        for folder, message_ids in message_ids_by_folder.items():
+            uids_by_folder, errors = await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, folder
+            )
+            for f, entries in uids_by_folder.items():
+                all_uids.setdefault(f, []).extend(entries)
+            all_errors.extend(errors)
+
+        if not all_uids:
+            return 0, all_errors
+
+        succeeded, move_errors = await asyncio.to_thread(
+            self._batch_move_sync, all_uids, to_folder
+        )
+        return succeeded, all_errors + move_errors
+
+    async def batch_add_flags_by_folder(
+        self,
+        message_ids_by_folder: dict[str, list[str]],
+        flags: list[str],
+    ) -> tuple[int, list[dict]]:
+        """Batch add flags with pre-resolved folders.
+
+        Accepts {folder: [message_id, ...]} so each group only searches
+        one IMAP folder (fast). A message may appear in multiple folder
+        groups if it exists in multiple folders (e.g. self-sent emails).
+        Returns (succeeded, errors) with reasons.
+        """
+        await self._ensure_connected()
+        all_uids: dict[str, list[tuple[str, int]]] = {}
+        all_errors: list[dict] = []
+
+        for folder, message_ids in message_ids_by_folder.items():
+            uids_by_folder, errors = await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, folder
+            )
+            for f, entries in uids_by_folder.items():
+                all_uids.setdefault(f, []).extend(entries)
+            all_errors.extend(errors)
+
+        if not all_uids:
+            return 0, all_errors
+
+        succeeded, flag_errors = await asyncio.to_thread(
+            self._batch_add_flags_sync, all_uids, flags
+        )
+        return succeeded, all_errors + flag_errors

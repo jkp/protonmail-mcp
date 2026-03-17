@@ -49,7 +49,7 @@ class Folder(BaseModel):
 
 class SearchResult(BaseModel):
     message_id: str
-    folder: str = ""
+    folders: list[str] = []
     subject: str = ""
     date: str = ""
     authors: str = ""

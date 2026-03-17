@@ -83,6 +83,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     batch._imap = imap
     batch._sync_engine = sync_engine
     batch._store = store
+    batch._searcher = _searcher
 
     idle_listener: IdleListener | None = None
 
@@ -156,6 +157,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         batch._imap = None
         batch._sync_engine = None
         batch._store = None
+        batch._searcher = None
         logger.info("server.shutdown")
 
 

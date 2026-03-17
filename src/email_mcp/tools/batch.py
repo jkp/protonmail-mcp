@@ -1,6 +1,7 @@
 """Batch tools: batch_read, batch_archive, batch_mark_read, batch_delete.
 
 Batch operations reduce MCP round-trips from O(N) to O(1) for inbox triage.
+Query-based batch tools push filtering to the server via notmuch search.
 """
 
 import asyncio
@@ -9,6 +10,7 @@ from typing import Any
 import structlog
 
 from email_mcp.imap import ImapError, ImapMutator
+from email_mcp.search import NotmuchError, NotmuchSearcher, translate_query
 from email_mcp.server import mcp
 from email_mcp.store import MaildirStore
 from email_mcp.sync import SyncEngine
@@ -20,6 +22,16 @@ logger = structlog.get_logger()
 _imap: ImapMutator | None = None
 _sync_engine: SyncEngine | None = None
 _store: MaildirStore | None = None
+_searcher: NotmuchSearcher | None = None
+
+
+_MAX_SAMPLE_SUBJECTS = 10
+
+
+def _require_searcher() -> NotmuchSearcher:
+    if _searcher is None:
+        raise RuntimeError("Searcher not initialized")
+    return _searcher
 
 
 def _require_imap() -> ImapMutator:
@@ -102,13 +114,13 @@ async def batch_read(
     annotations={"destructiveHint": False, "title": "Batch Archive Emails"}
 )
 async def batch_archive(
-    message_ids: list[str], folder: str | None = None
+    message_ids: list[str], folder: str = "INBOX"
 ) -> dict[str, Any]:
     """Archive multiple emails in one call.
 
     Args:
         message_ids: List of Message-ID header values to archive
-        folder: Current folder hint (optional, speeds up UID lookup)
+        folder: Folder the emails are in (required for fast IMAP lookup)
     """
     logger.info("tool.batch_archive", count=len(message_ids), folder=folder)
     imap = _require_imap()
@@ -210,6 +222,204 @@ async def batch_delete(
     logger.info("tool.batch_delete.done", succeeded=succeeded, failed=len(errors))
     return {
         "status": "completed",
+        "succeeded": succeeded,
+        "failed": len(errors),
+        "errors": errors,
+    }
+
+
+# ── Query-based batch operations ─────────────────────────────────────
+
+
+async def _search_to_folder_groups(
+    query: str,
+) -> tuple[dict[str, list[str]], list[dict[str, str]]]:
+    """Run notmuch search and group results by folder.
+
+    Returns:
+        (ids_by_folder, results_as_dicts) where ids_by_folder is
+        {folder: [message_id, ...]} and results_as_dicts has subject info
+        for dry-run reporting.
+    """
+    searcher = _require_searcher()
+    translated = translate_query(query)
+    results = await searcher.search(translated)
+
+    ids_by_folder: dict[str, list[str]] = {}
+    for r in results:
+        folders = r.folders or ["INBOX"]
+        for folder in folders:
+            ids_by_folder.setdefault(folder, []).append(r.message_id)
+
+    return ids_by_folder, [
+        {"message_id": r.message_id, "folders": r.folders, "subject": r.subject}
+        for r in results
+    ]
+
+
+def _dry_run_response(
+    results: list[dict[str, Any]],
+    ids_by_folder: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Build a dry-run response with count, sample subjects, and folder breakdown."""
+    subjects = [r["subject"] for r in results if r.get("subject")]
+    by_folder = {folder: len(ids) for folder, ids in sorted(ids_by_folder.items())}
+    return {
+        "would_affect": len(results),
+        "sample_subjects": subjects[:_MAX_SAMPLE_SUBJECTS],
+        "by_folder": by_folder,
+    }
+
+
+@mcp.tool(
+    annotations={"destructiveHint": False, "title": "Search and Mark Read"}
+)
+async def search_and_mark_read(
+    query: str, dry_run: bool = True
+) -> dict[str, Any]:
+    """Mark all emails matching a search query as read.
+
+    Uses notmuch for instant local search, then applies flags via IMAP
+    with pre-resolved folder hints (fast).
+
+    Args:
+        query: Gmail-style search query (e.g. "from:newsletter")
+        dry_run: If True (default), return count + sample subjects without acting
+    """
+    logger.info("tool.search_and_mark_read", query=query, dry_run=dry_run)
+
+    try:
+        ids_by_folder, results = await _search_to_folder_groups(query)
+    except (NotmuchError, Exception) as e:
+        logger.error("tool.search_and_mark_read.search_failed", error=str(e))
+        return {"error": "search_failed", "detail": str(e)}
+
+    if dry_run:
+        return _dry_run_response(results, ids_by_folder)
+
+    if not ids_by_folder:
+        return {"succeeded": 0, "failed": 0, "errors": []}
+
+    imap = _require_imap()
+    succeeded, errors = await imap.batch_add_flags_by_folder(
+        ids_by_folder, [r"\Seen"]
+    )
+
+    logger.info(
+        "tool.search_and_mark_read.done",
+        succeeded=succeeded,
+        failed=len(errors),
+    )
+    return {
+        "succeeded": succeeded,
+        "failed": len(errors),
+        "errors": errors,
+    }
+
+
+@mcp.tool(
+    annotations={"destructiveHint": False, "title": "Search and Archive"}
+)
+async def search_and_archive(
+    query: str, dry_run: bool = True
+) -> dict[str, Any]:
+    """Archive all emails matching a search query.
+
+    Uses notmuch for instant local search, then moves via IMAP
+    with pre-resolved folder hints (fast).
+
+    Args:
+        query: Gmail-style search query (e.g. "from:newsletter")
+        dry_run: If True (default), return count + sample subjects without acting
+    """
+    logger.info("tool.search_and_archive", query=query, dry_run=dry_run)
+
+    try:
+        ids_by_folder, results = await _search_to_folder_groups(query)
+    except (NotmuchError, Exception) as e:
+        logger.error("tool.search_and_archive.search_failed", error=str(e))
+        return {"error": "search_failed", "detail": str(e)}
+
+    if dry_run:
+        return _dry_run_response(results, ids_by_folder)
+
+    if not ids_by_folder:
+        return {"succeeded": 0, "failed": 0, "errors": []}
+
+    imap = _require_imap()
+    local_store = _require_store()
+    sync = _require_sync()
+
+    succeeded, errors = await imap.batch_move_by_folder(ids_by_folder, "Archive")
+
+    # Optimistic local moves for succeeded messages
+    failed_ids = {e["message_id"] for e in errors}
+    for r in results:
+        if r["message_id"] not in failed_ids:
+            for folder in r["folders"] or ["INBOX"]:
+                local_store.optimistic_move(r["message_id"], "Archive", folder)
+
+    sync.request_reindex()
+    logger.info(
+        "tool.search_and_archive.done",
+        succeeded=succeeded,
+        failed=len(errors),
+    )
+    return {
+        "succeeded": succeeded,
+        "failed": len(errors),
+        "errors": errors,
+    }
+
+
+@mcp.tool(
+    annotations={"destructiveHint": True, "title": "Search and Delete"}
+)
+async def search_and_delete(
+    query: str, dry_run: bool = True
+) -> dict[str, Any]:
+    """Delete all emails matching a search query (move to Trash).
+
+    Uses notmuch for instant local search, then moves via IMAP
+    with pre-resolved folder hints (fast).
+
+    Args:
+        query: Gmail-style search query (e.g. "from:spam")
+        dry_run: If True (default), return count + sample subjects without acting
+    """
+    logger.info("tool.search_and_delete", query=query, dry_run=dry_run)
+
+    try:
+        ids_by_folder, results = await _search_to_folder_groups(query)
+    except (NotmuchError, Exception) as e:
+        logger.error("tool.search_and_delete.search_failed", error=str(e))
+        return {"error": "search_failed", "detail": str(e)}
+
+    if dry_run:
+        return _dry_run_response(results, ids_by_folder)
+
+    if not ids_by_folder:
+        return {"succeeded": 0, "failed": 0, "errors": []}
+
+    imap = _require_imap()
+    local_store = _require_store()
+    sync = _require_sync()
+
+    succeeded, errors = await imap.batch_move_by_folder(ids_by_folder, "Trash")
+
+    failed_ids = {e["message_id"] for e in errors}
+    for r in results:
+        if r["message_id"] not in failed_ids:
+            for folder in r["folders"] or ["INBOX"]:
+                local_store.optimistic_move(r["message_id"], "Trash", folder)
+
+    sync.request_reindex()
+    logger.info(
+        "tool.search_and_delete.done",
+        succeeded=succeeded,
+        failed=len(errors),
+    )
+    return {
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,

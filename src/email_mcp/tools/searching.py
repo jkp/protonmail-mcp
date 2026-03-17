@@ -50,7 +50,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
     return [
         {
             "message_id": r.message_id,
-            "folder": r.folder,
+            "folders": r.folders,
             "subject": r.subject,
             "date": r.date,
             "authors": r.authors,
