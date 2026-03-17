@@ -437,25 +437,25 @@ class TestSearchAndMarkRead:
         assert result["error"] == "search_failed"
         assert "locked" in result["detail"]
 
-    async def test_rejects_batch_over_limit(self, mock_searcher):
+    async def test_truncates_and_reports_remaining(self, mock_searcher, mock_imap):
         from email_mcp.tools.batch import _MAX_BATCH_SIZE, search_and_mark_read
 
-        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 1)
+        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 10)
 
         result = await search_and_mark_read(query="from:x", dry_run=False)
 
-        assert result["error"] == "batch_too_large"
-        assert result["count"] == _MAX_BATCH_SIZE + 1
-        assert result["limit"] == _MAX_BATCH_SIZE
+        # Should process _MAX_BATCH_SIZE, report remaining
+        assert result["remaining"] == 10
+        mock_imap.batch_add_flags_by_folder.assert_awaited_once()
 
-    async def test_dry_run_still_works_over_limit(self, mock_searcher):
+    async def test_dry_run_shows_full_count_over_limit(self, mock_searcher):
         from email_mcp.tools.batch import _MAX_BATCH_SIZE, search_and_mark_read
 
-        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 1)
+        mock_searcher.search.return_value = _make_search_results(_MAX_BATCH_SIZE + 10)
 
         result = await search_and_mark_read(query="from:x", dry_run=True)
 
-        assert result["would_affect"] == _MAX_BATCH_SIZE + 1
+        assert result["would_affect"] == _MAX_BATCH_SIZE + 10
 
 
 class TestSearchAndArchive:

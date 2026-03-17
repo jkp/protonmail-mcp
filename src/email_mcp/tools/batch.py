@@ -27,9 +27,10 @@ _searcher: NotmuchSearcher | None = None
 
 _MAX_SAMPLE_SUBJECTS = 10
 # ProtonMail's API processes up to 150 messages per request, but each
-# message takes ~500ms server-side. We cap at 50 (~25s) to keep the AI
-# in the loop with fast feedback rather than blocking for minutes.
-_MAX_BATCH_SIZE = 50
+# message takes ~500ms server-side (COPY) or ~85ms (SEARCH) through Bridge.
+# We cap at 20 for quick feedback — the AI calls again for the next batch.
+_MAX_BATCH_SIZE = 20
+
 
 
 def _require_searcher() -> NotmuchSearcher:
@@ -130,9 +131,8 @@ async def batch_archive(
         folder: Folder the emails are in (required for fast IMAP lookup)
     """
     logger.info("tool.batch_archive", count=len(message_ids), folder=folder)
-    too_large = _check_batch_size(len(message_ids))
-    if too_large:
-        return too_large
+    total = len(message_ids)
+    message_ids = message_ids[:_MAX_BATCH_SIZE]
     imap = _require_imap()
     local_store = _require_store()
     sync = _require_sync()
@@ -147,6 +147,7 @@ async def batch_archive(
         if not any(e["message_id"] == mid for e in errors):
             local_store.optimistic_move(mid, "Archive", folder)
 
+    remaining = total - len(message_ids)
     sync.request_reindex()
     logger.info("tool.batch_archive.done", succeeded=succeeded, failed=len(errors))
     return {
@@ -154,6 +155,7 @@ async def batch_archive(
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
 
 
@@ -173,9 +175,8 @@ async def batch_mark_read(
         folder: Current folder hint (optional)
     """
     logger.info("tool.batch_mark_read", count=len(message_ids), folder=folder)
-    too_large = _check_batch_size(len(message_ids))
-    if too_large:
-        return too_large
+    total = len(message_ids)
+    message_ids = message_ids[:_MAX_BATCH_SIZE]
     imap = _require_imap()
 
     try:
@@ -186,12 +187,14 @@ async def batch_mark_read(
         logger.error("tool.batch_mark_read.imap_failed", error=str(e))
         return {"error": "imap_error", "detail": str(e)}
 
+    remaining = total - len(message_ids)
     logger.info("tool.batch_mark_read.done", succeeded=succeeded, failed=len(errors))
     return {
         "status": "completed",
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
 
 
@@ -216,9 +219,8 @@ async def batch_delete(
         folder: Current folder hint (optional)
     """
     logger.info("tool.batch_delete", count=len(message_ids), confirm=confirm)
-    too_large = _check_batch_size(len(message_ids))
-    if too_large:
-        return too_large
+    total = len(message_ids)
+    message_ids = message_ids[:_MAX_BATCH_SIZE]
     if not confirm:
         return {
             "error": "confirmation_required",
@@ -240,6 +242,7 @@ async def batch_delete(
         if not any(e["message_id"] == mid for e in errors):
             local_store.optimistic_move(mid, "Trash", folder)
 
+    remaining = total - len(message_ids)
     sync.request_reindex()
     logger.info("tool.batch_delete.done", succeeded=succeeded, failed=len(errors))
     return {
@@ -247,6 +250,7 @@ async def batch_delete(
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
 
 
@@ -279,16 +283,29 @@ async def _search_to_folder_groups(
     ]
 
 
-def _check_batch_size(result_count: int) -> dict[str, Any] | None:
-    """Return an error dict if the batch exceeds _MAX_BATCH_SIZE, else None."""
-    if result_count > _MAX_BATCH_SIZE:
-        return {
-            "error": "batch_too_large",
-            "count": result_count,
-            "limit": _MAX_BATCH_SIZE,
-            "hint": "Narrow your query (e.g. add in:inbox, older_than:7d, or a more specific from/subject)",
-        }
-    return None
+def _truncate_to_batch_size(
+    ids_by_folder: dict[str, list[str]],
+    results: list[dict[str, Any]],
+) -> tuple[dict[str, list[str]], list[dict[str, Any]], int]:
+    """Truncate results to _MAX_BATCH_SIZE, preserving folder grouping.
+
+    Returns (truncated_ids_by_folder, truncated_results, total_before_truncation).
+    """
+    total = len(results)
+    if total <= _MAX_BATCH_SIZE:
+        return ids_by_folder, results, total
+
+    # Take the first _MAX_BATCH_SIZE results
+    kept = results[:_MAX_BATCH_SIZE]
+    kept_ids = {r["message_id"] for r in kept}
+
+    truncated: dict[str, list[str]] = {}
+    for folder, mids in ids_by_folder.items():
+        filtered = [mid for mid in mids if mid in kept_ids]
+        if filtered:
+            truncated[folder] = filtered
+
+    return truncated, kept, total
 
 
 def _dry_run_response(
@@ -318,8 +335,8 @@ async def search_and_mark_read(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Limited to 50 messages per call — narrow the query if the dry run
-    shows more. This keeps each call fast (~25s max) with regular feedback.
+    Processes up to {batch_size} messages per call. If more match, the response
+    includes "remaining" — call again with the same query to continue.
 
     Args:
         query: Gmail-style search query (e.g. "from:newsletter", "is:unread in:inbox")
@@ -337,26 +354,29 @@ async def search_and_mark_read(
         return _dry_run_response(results, ids_by_folder)
 
     if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": []}
+        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
 
-    too_large = _check_batch_size(len(results))
-    if too_large:
-        return too_large
+    ids_by_folder, results, total = _truncate_to_batch_size(
+        ids_by_folder, results
+    )
 
     imap = _require_imap()
     succeeded, errors = await imap.batch_add_flags_by_folder(
         ids_by_folder, [r"\Seen"]
     )
 
+    remaining = total - len(results)
     logger.info(
         "tool.search_and_mark_read.done",
         succeeded=succeeded,
         failed=len(errors),
+        remaining=remaining,
     )
     return {
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
 
 
@@ -373,8 +393,8 @@ async def search_and_archive(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Limited to 50 messages per call — narrow the query if the dry run
-    shows more. This keeps each call fast (~25s max) with regular feedback.
+    Processes up to {batch_size} messages per call. If more match, the response
+    includes "remaining" — call again with the same query to continue.
 
     Args:
         query: Gmail-style search query (e.g. "from:newsletter", "older_than:30d")
@@ -392,11 +412,11 @@ async def search_and_archive(
         return _dry_run_response(results, ids_by_folder)
 
     if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": []}
+        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
 
-    too_large = _check_batch_size(len(results))
-    if too_large:
-        return too_large
+    ids_by_folder, results, total = _truncate_to_batch_size(
+        ids_by_folder, results
+    )
 
     imap = _require_imap()
     local_store = _require_store()
@@ -411,16 +431,19 @@ async def search_and_archive(
             for folder in r["folders"] or ["INBOX"]:
                 local_store.optimistic_move(r["message_id"], "Archive", folder)
 
+    remaining = total - len(results)
     sync.request_reindex()
     logger.info(
         "tool.search_and_archive.done",
         succeeded=succeeded,
         failed=len(errors),
+        remaining=remaining,
     )
     return {
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
 
 
@@ -437,8 +460,8 @@ async def search_and_delete(
 
     Workflow: call with dry_run=True first to preview (returns count,
     sample subjects, and per-folder breakdown), then dry_run=False to execute.
-    Limited to 50 messages per call — narrow the query if the dry run
-    shows more. This keeps each call fast (~25s max) with regular feedback.
+    Processes up to {batch_size} messages per call. If more match, the response
+    includes "remaining" — call again with the same query to continue.
 
     Args:
         query: Gmail-style search query (e.g. "from:spam", "subject:unsubscribe")
@@ -456,11 +479,11 @@ async def search_and_delete(
         return _dry_run_response(results, ids_by_folder)
 
     if not ids_by_folder:
-        return {"succeeded": 0, "failed": 0, "errors": []}
+        return {"succeeded": 0, "failed": 0, "errors": [], "remaining": 0}
 
-    too_large = _check_batch_size(len(results))
-    if too_large:
-        return too_large
+    ids_by_folder, results, total = _truncate_to_batch_size(
+        ids_by_folder, results
+    )
 
     imap = _require_imap()
     local_store = _require_store()
@@ -474,14 +497,23 @@ async def search_and_delete(
             for folder in r["folders"] or ["INBOX"]:
                 local_store.optimistic_move(r["message_id"], "Trash", folder)
 
+    remaining = total - len(results)
     sync.request_reindex()
     logger.info(
         "tool.search_and_delete.done",
         succeeded=succeeded,
         failed=len(errors),
+        remaining=remaining,
     )
     return {
         "succeeded": succeeded,
         "failed": len(errors),
         "errors": errors,
+        "remaining": remaining,
     }
+
+
+# Interpolate batch size into docstrings so it's defined in one place
+for _fn in (search_and_mark_read, search_and_archive, search_and_delete):
+    if _fn.__doc__:
+        _fn.__doc__ = _fn.__doc__.format(batch_size=_MAX_BATCH_SIZE)
