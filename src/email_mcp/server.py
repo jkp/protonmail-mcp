@@ -1,8 +1,18 @@
-"""FastMCP server instance and entry point."""
+"""FastMCP server instance and entry point.
 
+v4 startup sequence:
+1. Open SQLite database
+2. Create ProtonMail API client (load saved session)
+3. Connect Bridge IMAP (for body indexer only)
+4. Run InitialSync (idempotent — no-op if already done)
+5. Start EventLoop background task (ProtonMail event polling)
+6. Start BodyIndexer worker queue (IMAP body fetch + FTS index)
+7. Accept MCP connections
+"""
+
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import structlog
 from fastmcp import FastMCP
@@ -18,44 +28,29 @@ configure_logging(settings.log_level, ntfy_url=settings.ntfy_url, ntfy_topic=set
 logger = structlog.get_logger()
 
 
-def _ensure_notmuch_config(config_path: Path) -> None:
-    """Generate notmuch config from server settings if it doesn't exist."""
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    config_text = f"""\
-[database]
-path={settings.maildir_path}
-
-[new]
-tags=unread;inbox
-ignore=.mbsyncstate;.uidvalidity
-
-[search]
-exclude_tags=deleted;spam
-
-[maildir]
-synchronize_flags=true
-"""
-    config_path.write_text(config_text)
-    logger.info("notmuch.config_generated", path=str(config_path))
-
-
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
-    """Initialize IMAP mutator, sync engine, IDLE listener on startup."""
+    """Initialize v4 components: ProtonMail API, event loop, body indexer."""
     import email_mcp.tools.batch as batch
     import email_mcp.tools.managing as managing
-    from email_mcp.idle import IdleListener
+    from email_mcp.body_indexer import BodyIndexer
+    from email_mcp.event_loop import EventLoop
     from email_mcp.imap import ImapMutator
-    from email_mcp.sync import SyncEngine
-    from email_mcp.tools.searching import _searcher
+    from email_mcp.initial_sync import InitialSync
+    from email_mcp.proton_api import AuthError, ProtonClient
 
-    notmuch_config = settings.maildir_path / ".notmuch" / "config"
-    if not notmuch_config.exists():
-        _ensure_notmuch_config(notmuch_config)
-    notmuch_config_str = str(notmuch_config)
+    # 1. Create ProtonMail API client (loads session from disk)
+    api = ProtonClient(
+        username=settings.imap_username,
+        password=settings.proton_password,
+        session_path=settings.proton_session_file,
+    )
 
-    # 1. Create IMAP mutator (fall back to SMTP cert for Bridge)
+    # 2. Set API ref on tools immediately (before any background tasks)
+    managing._api = api
+    batch._api = api
+
+    # 3. Connect Bridge IMAP for body indexer
     imap_cert = settings.imap_cert_path or settings.smtp_cert_path
     imap = ImapMutator(
         host=settings.imap_host,
@@ -66,108 +61,74 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         cert_path=imap_cert,
     )
 
-    # 2. Create sync engine
-    sync_engine = SyncEngine(
-        mbsync_bin=settings.mbsync_bin,
-        notmuch_bin=settings.notmuch_bin,
-        notmuch_config=notmuch_config_str,
-        mbsync_channel=settings.mbsync_channel,
-        reindex_debounce=settings.reindex_debounce,
-    )
+    body_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    body_indexer = BodyIndexer(db=db, imap=imap, workers=3)
+    event_loop = EventLoop(db=db, api=api, body_queue=body_queue)
+    initial_sync = InitialSync(db=db, api=api, body_indexer=body_indexer)
 
-    # 3. Set module-level refs for tools
-    managing._imap = imap
-    managing._sync_engine = sync_engine
-    managing._store = store
-    managing._searcher = _searcher
-
-    batch._imap = imap
-    batch._sync_engine = sync_engine
-    batch._store = store
-    batch._searcher = _searcher
-
-    idle_listener: IdleListener | None = None
+    background_tasks: list[asyncio.Task] = []
 
     try:
-        # 4. Connect IMAP
+        # 4. Connect Bridge IMAP (non-fatal if unavailable)
         try:
             await imap.connect()
             logger.info("server.imap_connected")
         except Exception:
             logger.warning("server.imap_connect_failed", exc_info=True)
 
-        # 5. Startup sync
-        if settings.full_sync_on_startup:
-            logger.info("server.full_sync_on_startup")
-            try:
-                await sync_engine.full_sync_and_rebuild(
-                    maildir_root=str(settings.maildir_path)
-                )
-                logger.info("server.full_sync_on_startup.done")
-            except Exception:
-                logger.warning("server.full_sync_on_startup.failed", exc_info=True)
-        elif settings.sync_on_startup:
-            logger.info("server.startup_sync")
-            try:
-                await sync_engine.sync_inbox()
-                logger.info("server.startup_sync.done")
-            except Exception:
-                logger.warning("server.startup_sync.failed", exc_info=True)
-            # Background reindex
-            sync_engine.request_reindex()
+        # 5. Validate API session (non-fatal — may need re-auth)
+        try:
+            await api.get_latest_event_id()
+            logger.info("server.api_session_valid")
+        except AuthError:
+            logger.warning("server.api_auth_required",
+                           detail="Run 'email-mcp auth' to authenticate with ProtonMail")
+        except Exception:
+            logger.warning("server.api_check_failed", exc_info=True)
 
-        # 7. Start IDLE listener if enabled
-        if settings.idle_enabled:
-            idle_listener = IdleListener(
-                host=settings.imap_host,
-                port=settings.imap_port,
-                username=settings.imap_username,
-                password=settings.imap_password,
-                starttls=settings.imap_starttls,
-                cert_path=imap_cert,
-                on_change=sync_engine.sync_inbox,
+        # 6. Initial sync (idempotent — no-op if already completed)
+        try:
+            await initial_sync.run()
+        except Exception:
+            logger.warning("server.initial_sync_failed", exc_info=True)
+
+        # 7. Start event loop background task
+        background_tasks.append(
+            asyncio.create_task(event_loop.run(), name="event_loop")
+        )
+
+        # 8. Start body indexer worker queue
+        background_tasks.append(
+            asyncio.create_task(
+                body_indexer.run_workers(body_queue), name="body_indexer"
             )
-            try:
-                await idle_listener.start()
-                logger.info("server.idle_started")
-            except Exception:
-                logger.warning("server.idle_start_failed", exc_info=True)
-                idle_listener = None
-
-        # 8. Start periodic INBOX sync
-        sync_engine.start_inbox_loop(interval=settings.inbox_sync_interval)
-
-        # 9. Schedule nightly full sync
-        if settings.nightly_sync_enabled:
-            sync_engine.schedule_nightly(hour=settings.nightly_sync_hour)
+        )
 
         logger.info("server.ready")
-
         yield
 
     finally:
-        # Shutdown
-        if idle_listener:
-            await idle_listener.stop()
-        await sync_engine.stop()
+        # Cancel background tasks
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
+        # Send sentinel to drain body queue workers cleanly
+        try:
+            for _ in range(body_indexer._workers):
+                body_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
         await imap.disconnect()
-        managing._imap = None
-        managing._sync_engine = None
-        managing._store = None
-        managing._searcher = None
-        batch._imap = None
-        batch._sync_engine = None
-        batch._store = None
-        batch._searcher = None
+        managing._api = None
+        batch._api = None
         logger.info("server.shutdown")
 
 
 def _build_auth_storage(s: Settings):
-    """Build persistent OAuth state storage if oauth_state_dir is configured.
-
-    Returns a FileTreeStore pointed at the configured directory, or None
-    to let FastMCP use its default (ephemeral across container restarts).
-    """
+    """Build persistent OAuth state storage if oauth_state_dir is configured."""
     if s.oauth_state_dir is None:
         return None
 
@@ -226,7 +187,6 @@ def _build_auth():
         base_url=settings.oauth_base_url or f"http://localhost:{settings.port}",
         client_storage=_build_auth_storage(settings),
     )
-    # Cache token verification for 5 minutes to avoid GitHub API calls on every request
     _cached_verify_token(provider, ttl=300)
     return provider
 
@@ -283,7 +243,7 @@ def main() -> None:
         port=settings.port,
         auth_enabled=settings.github_client_id is not None,
         log_level=settings.log_level,
-        maildir_root=str(settings.maildir_path),
+        db_path=str(settings.database_path),
     )
     if settings.transport == "http":
         mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)

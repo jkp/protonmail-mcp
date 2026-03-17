@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     def database_path(self) -> Path:
         return self.db_path.expanduser().resolve()
 
+    # v4 ProtonMail native API
+    # proton_username: same as imap_username (ProtonMail email address)
+    # proton_password: actual ProtonMail account password (for SRP auth, not Bridge app password)
+    proton_password: str = ""
+    proton_session_path: Path = Path("~/.local/share/email-mcp/proton_session.json")
+
+    @property
+    def proton_session_file(self) -> Path:
+        return self.proton_session_path.expanduser().resolve()
+
     # IMAP cert (shared between IMAP mutator and STARTTLS)
     imap_cert_path: str = ""
 
