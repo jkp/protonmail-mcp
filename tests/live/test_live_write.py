@@ -5,7 +5,6 @@ from fastmcp import Client
 
 from tests.live.conftest import (
     _parse_result,
-    cleanup_test_emails,
     live,
     make_subject,
     poll_for_email,
@@ -35,8 +34,6 @@ class TestSend:
         email = await poll_for_email(live_client, subject)
         assert email is not None, f"Email '{subject}' never arrived in INBOX"
 
-        await cleanup_test_emails(live_client)
-
 
 class TestReply:
     async def test_reply_to_self(self, live_client: Client) -> None:
@@ -63,8 +60,6 @@ class TestReply:
         data = _parse_result(result)
         assert data["status"] == "sent"
         assert data["in_reply_to"] == email["message_id"]
-
-        await cleanup_test_emails(live_client)
 
 
 class TestForward:
@@ -93,5 +88,3 @@ class TestForward:
         data = _parse_result(result)
         assert data["status"] == "sent"
         assert data["forwarded_to"] == SELF_ADDR
-
-        await cleanup_test_emails(live_client)

@@ -5,7 +5,6 @@ from fastmcp import Client
 
 from tests.live.conftest import (
     _parse_result,
-    cleanup_test_emails,
     live,
     make_subject,
     poll_for_email,
@@ -44,8 +43,6 @@ class TestArchive:
         data = _parse_result(result)
         assert data["status"] == "archived"
 
-        await cleanup_test_emails(live_client)
-
 
 @skip_no_smtp
 class TestMoveEmail:
@@ -62,8 +59,6 @@ class TestMoveEmail:
         data = _parse_result(result)
         assert data["status"] == "moved"
 
-        await cleanup_test_emails(live_client)
-
 
 @skip_no_smtp
 class TestDelete:
@@ -74,5 +69,3 @@ class TestDelete:
         )
         data = _parse_result(result)
         assert data["status"] == "deleted"
-
-        await cleanup_test_emails(live_client)

@@ -163,39 +163,3 @@ async def live_client():
             mcp.middleware = original_middleware
 
 
-async def cleanup_test_emails(_client: Client | None = None) -> None:
-    """Delete any emails with our test subject prefix + run ID.
-
-    Scans Maildir files directly by reading headers (no O(n) Message-ID scan).
-    """
-    _cleanup_test_files()
-
-
-def _cleanup_test_files() -> None:
-    """Synchronous cleanup: remove test email files from Maildir."""
-    try:
-        settings = Settings()
-        maildir = settings.maildir_path
-        for folder_name in ["INBOX", "Sent", "Archive", "Trash"]:
-            for subdir in ("cur", "new"):
-                folder = maildir / folder_name / subdir
-                if not folder.is_dir():
-                    continue
-                for f in folder.iterdir():
-                    if not f.is_file():
-                        continue
-                    try:
-                        head = f.read_bytes()[:4096].decode(errors="replace")
-                        if f"{TEST_SUBJECT_PREFIX} {RUN_ID}" in head:
-                            f.unlink()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-
-@pytest.fixture(scope="session", autouse=True)
-def cleanup_after_all_tests():
-    """Session-scoped cleanup: remove all test emails after the full run."""
-    yield
-    _cleanup_test_files()

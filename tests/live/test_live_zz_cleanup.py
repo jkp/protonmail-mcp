@@ -1,7 +1,15 @@
-"""Live tests for query-based batch tools (search_and_mark_read, search_and_delete).
+"""Live cleanup: runs last to clean up all test emails via IMAP.
 
-These tests use the [MCP-TEST] subject prefix to find leftover test emails,
-exercise the dry_run flow, then clean them up via search_and_delete.
+This file is named zz_ so it sorts after all other live tests.
+It exercises the query-based batch tools (search_and_mark_read,
+search_and_delete) while cleaning up [MCP-TEST] emails created
+by earlier tests.
+
+Sequence:
+  1. Sync to ensure notmuch index is fresh
+  2. search_and_mark_read — dry run, then execute
+  3. search_and_delete — dry run, then execute
+  4. Verify nothing remains
 """
 
 import pytest
@@ -17,13 +25,20 @@ from tests.live.conftest import (
 
 pytestmark = [live, skip_no_maildir, skip_no_notmuch, pytest.mark.timeout(120)]
 
-# Query that matches all test emails across all folders
 # Quote the brackets to avoid luqum parsing them as range syntax
 TEST_QUERY = f'subject:"{TEST_SUBJECT_PREFIX}"'
 
 
-class TestSearchAndMarkRead:
-    async def test_dry_run_finds_test_emails(self, live_client: Client) -> None:
+class TestCleanupMarkRead:
+    """Mark all test emails as read before deletion."""
+
+    async def test_sync_before_cleanup(self, live_client: Client) -> None:
+        """Sync so notmuch can find all test emails from this run."""
+        result = await live_client.call_tool("sync_now", {})
+        data = _parse_result(result)
+        assert data.get("status") != "error"
+
+    async def test_dry_run(self, live_client: Client) -> None:
         result = await live_client.call_tool(
             "search_and_mark_read",
             {"query": TEST_QUERY, "dry_run": True},
@@ -31,14 +46,11 @@ class TestSearchAndMarkRead:
         data = _parse_result(result)
         assert "would_affect" in data
         assert isinstance(data["would_affect"], int)
-        assert "sample_subjects" in data
-        assert isinstance(data["sample_subjects"], list)
-        # All sample subjects should contain our test prefix
-        for subj in data["sample_subjects"]:
+        assert "by_folder" in data
+        for subj in data.get("sample_subjects", []):
             assert TEST_SUBJECT_PREFIX in subj
 
-    async def test_execute_marks_read(self, live_client: Client) -> None:
-        # Dry run first to see what we're working with
+    async def test_execute(self, live_client: Client) -> None:
         dry = await live_client.call_tool(
             "search_and_mark_read",
             {"query": TEST_QUERY, "dry_run": True},
@@ -47,7 +59,6 @@ class TestSearchAndMarkRead:
         if dry_data["would_affect"] == 0:
             pytest.skip("No test emails to mark as read")
 
-        # Execute
         result = await live_client.call_tool(
             "search_and_mark_read",
             {"query": TEST_QUERY, "dry_run": False},
@@ -55,12 +66,13 @@ class TestSearchAndMarkRead:
         data = _parse_result(result)
         assert "succeeded" in data
         assert "failed" in data
-        assert "errors" in data
         assert data["succeeded"] + data["failed"] == dry_data["would_affect"]
 
 
-class TestSearchAndDelete:
-    async def test_dry_run_finds_test_emails(self, live_client: Client) -> None:
+class TestCleanupDelete:
+    """Delete all test emails — the final cleanup step."""
+
+    async def test_dry_run(self, live_client: Client) -> None:
         result = await live_client.call_tool(
             "search_and_delete",
             {"query": TEST_QUERY, "dry_run": True},
@@ -68,12 +80,11 @@ class TestSearchAndDelete:
         data = _parse_result(result)
         assert "would_affect" in data
         assert isinstance(data["would_affect"], int)
-        assert "sample_subjects" in data
-        for subj in data["sample_subjects"]:
+        assert "by_folder" in data
+        for subj in data.get("sample_subjects", []):
             assert TEST_SUBJECT_PREFIX in subj
 
-    async def test_execute_deletes_test_emails(self, live_client: Client) -> None:
-        # Dry run first
+    async def test_execute(self, live_client: Client) -> None:
         dry = await live_client.call_tool(
             "search_and_delete",
             {"query": TEST_QUERY, "dry_run": True},
@@ -82,7 +93,6 @@ class TestSearchAndDelete:
         if dry_data["would_affect"] == 0:
             pytest.skip("No test emails to delete")
 
-        # Execute
         result = await live_client.call_tool(
             "search_and_delete",
             {"query": TEST_QUERY, "dry_run": False},
@@ -90,14 +100,16 @@ class TestSearchAndDelete:
         data = _parse_result(result)
         assert "succeeded" in data
         assert "failed" in data
-        assert "errors" in data
         assert data["succeeded"] + data["failed"] == dry_data["would_affect"]
 
-        # Verify: dry run should now find fewer (ideally zero)
-        verify = await live_client.call_tool(
+    async def test_verify_clean(self, live_client: Client) -> None:
+        """After deletion, a fresh sync + search should find nothing."""
+        await live_client.call_tool("sync_now", {})
+        result = await live_client.call_tool(
             "search_and_delete",
             {"query": TEST_QUERY, "dry_run": True},
         )
-        verify_data = _parse_result(verify)
-        # Some may still show in stale notmuch index, but count should be reduced
-        assert verify_data["would_affect"] <= dry_data["would_affect"]
+        data = _parse_result(result)
+        assert data["would_affect"] == 0, (
+            f"Expected 0 test emails after cleanup, found {data['would_affect']}"
+        )
