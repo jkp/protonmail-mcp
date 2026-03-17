@@ -130,6 +130,9 @@ async def batch_archive(
         folder: Folder the emails are in (required for fast IMAP lookup)
     """
     logger.info("tool.batch_archive", count=len(message_ids), folder=folder)
+    too_large = _check_batch_size(len(message_ids))
+    if too_large:
+        return too_large
     imap = _require_imap()
     local_store = _require_store()
     sync = _require_sync()
@@ -170,6 +173,9 @@ async def batch_mark_read(
         folder: Current folder hint (optional)
     """
     logger.info("tool.batch_mark_read", count=len(message_ids), folder=folder)
+    too_large = _check_batch_size(len(message_ids))
+    if too_large:
+        return too_large
     imap = _require_imap()
 
     try:
@@ -210,6 +216,9 @@ async def batch_delete(
         folder: Current folder hint (optional)
     """
     logger.info("tool.batch_delete", count=len(message_ids), confirm=confirm)
+    too_large = _check_batch_size(len(message_ids))
+    if too_large:
+        return too_large
     if not confirm:
         return {
             "error": "confirmation_required",
