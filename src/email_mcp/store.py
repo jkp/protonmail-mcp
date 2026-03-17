@@ -1,6 +1,7 @@
 """Maildir operations: read, list, move, delete, flag management."""
 
 import email
+import email.parser
 import email.policy
 import email.utils
 import re
