@@ -111,9 +111,27 @@ def build_query(query: str) -> ParsedQuery:
     # Whatever's left is free-text for FTS
     fts = remaining.strip()
     if fts:
-        result.fts_terms = fts
+        result.fts_terms = _sanitize_fts(fts)
 
     return result
+
+
+def _sanitize_fts(text: str) -> str:
+    """Sanitize free-text for FTS5 MATCH.
+
+    FTS5 treats -, +, *, etc. as operators. Wrap tokens containing
+    special chars in double quotes so they're treated as literals.
+    Already-quoted phrases are left as-is.
+    """
+    tokens = []
+    for part in re.findall(r'"[^"]*"|\S+', text):
+        if part.startswith('"') and part.endswith('"'):
+            tokens.append(part)  # already quoted
+        elif re.search(r'[^\w\s]', part):
+            tokens.append(f'"{part}"')  # quote it
+        else:
+            tokens.append(part)
+    return " ".join(tokens)
 
 
 def _apply_operator(result: ParsedQuery, op: str, val: str) -> None:
