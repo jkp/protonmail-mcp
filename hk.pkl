@@ -1,0 +1,41 @@
+amends "package://github.com/jdx/hk/releases/download/v1.24.0/hk@1.24.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.24.0/hk@1.24.0#/Builtins.pkl"
+
+local linters = new Mapping<String, Step> {
+    ["ruff"] = Builtins.ruff
+    ["ruff_format"] = Builtins.ruff_format
+    ["ty"] {
+        types = List("python")
+        check = "uvx ty check {{files}}"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps {
+            ...linters
+        }
+    }
+    ["pre-push"] {
+        steps {
+            ...linters
+            ["pytest"] {
+                check = "uv run pytest -q --timeout=30"
+            }
+        }
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["check"] {
+        steps {
+            ...linters
+            ["pytest"] {
+                check = "uv run pytest -q --timeout=30"
+            }
+        }
+    }
+}

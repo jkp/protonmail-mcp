@@ -1,3 +1,17 @@
 [tools]
 python = "3.13"
 uv = "latest"
+hk = "latest"
+pkl = "latest"
+
+[tasks.lint]
+run = "hk check"
+description = "Run all linters"
+
+[tasks.fix]
+run = "hk fix"
+description = "Auto-fix lint issues"
+
+[tasks.test]
+run = "uv run pytest -q --timeout=30"
+description = "Run tests"
