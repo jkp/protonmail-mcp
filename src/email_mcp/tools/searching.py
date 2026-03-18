@@ -1,6 +1,6 @@
 """Search tool using FTS5 + semantic vector search."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -17,20 +17,14 @@ _embedder: Embedder | None = None
 
 
 def _format_date(unix_ts: int) -> str:
-    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+    return datetime.fromtimestamp(unix_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _format_result(r) -> dict[str, Any]:
     return {
         "message_id": r.message_id,
         "pm_id": r.pm_id,
-        "from": (
-            f"{r.sender_name} <{r.sender_email}>"
-            if r.sender_name
-            else r.sender_email
-        ),
+        "from": (f"{r.sender_name} <{r.sender_email}>" if r.sender_name else r.sender_email),
         "subject": r.subject,
         "date": _format_date(r.date),
         "folder": r.folder,
@@ -46,9 +40,7 @@ def _format_result(r) -> dict[str, Any]:
         "title": "Search Email",
     }
 )
-async def search(
-    query: str, limit: int = 20, offset: int = 0
-) -> list[dict[str, Any]]:
+async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
     """Search emails using semantic search with optional precise filters.
 
     Semantic queries find emails by meaning, not exact keywords:
@@ -94,21 +86,20 @@ async def search(
     results = [_row_to_message(r) for r in rows]
     seen_pm_ids = {r.pm_id for r in results}
 
-    # Phase 2: Vector search if we have an embedder and free-text terms
-    if _embedder and parsed.fts_terms and len(results) < limit:
-        remaining = limit - len(results)
+    # Phase 2: Vector search (always, not just fallback)
+    if _embedder and parsed.fts_terms:
         try:
             if parsed.where_clauses:
                 vector_pm_ids = _embedder.search_with_filters(
                     parsed.fts_terms,
                     where_clause=parsed.where,
                     params=parsed.params,
-                    limit=remaining + len(seen_pm_ids),
+                    limit=limit + len(seen_pm_ids),
                 )
             else:
                 vector_pm_ids = _embedder.search(
                     parsed.fts_terms,
-                    limit=remaining + len(seen_pm_ids),
+                    limit=limit + len(seen_pm_ids),
                 )
 
             # Add vector results not already in FTS results
