@@ -226,7 +226,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             loop = asyncio.get_event_loop()
             try:
                 while True:
-                    pm_ids = embedder.get_unembedded(limit=500)
+                    pm_ids = embedder.get_unembedded(limit=1000)
                     if not pm_ids:
                         await asyncio.sleep(30)
                         continue
