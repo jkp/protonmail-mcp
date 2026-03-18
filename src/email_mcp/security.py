@@ -1,7 +1,7 @@
 """Security hardening middleware for MCP servers.
 
-Strips server banners, blocks reconnaissance endpoints, adds
-security headers, and rate-limits unauthenticated requests.
+Strips server banners, blocks client registration after first setup,
+adds security headers, and rate-limits unauthenticated requests.
 
 Reusable across any FastMCP/Starlette server exposed to the internet.
 """
@@ -10,49 +10,49 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-
-# Path prefixes that leak server metadata to unauthenticated users.
-# Uses startswith matching, so "/.well-known/" blocks all discovery endpoints.
-_BLOCKED_PATHS = {
-    "/register",
-    "/.well-known/",
-}
+from starlette.responses import Response
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
     """Hardens an ASGI app for public internet exposure.
 
     - Strips `server` header (hides uvicorn/python)
-    - Blocks dynamic OAuth client registration
-    - Blocks OAuth metadata discovery endpoints
+    - Blocks /register once a client is already registered
+      (allows first-time OAuth setup, locks the door after)
     - Adds security headers (no sniff, no frame, etc.)
     - Rate-limits unauthenticated requests by IP
-    - Returns minimal error responses (no implementation details)
+    - Minimises auth error details
     """
 
     def __init__(
         self,
         app: Any,
         rate_limit_rpm: int = 60,
-        blocked_paths: set[str] | None = None,
+        oauth_state_dir: Path | None = None,
     ) -> None:
         super().__init__(app)
         self._rate_limit_rpm = rate_limit_rpm
-        self._blocked_paths = blocked_paths or _BLOCKED_PATHS
+        self._oauth_state_dir = oauth_state_dir
         self._request_counts: dict[str, list[float]] = defaultdict(list)
+
+    def _has_registered_clients(self) -> bool:
+        """Check if any OAuth clients have been registered."""
+        if not self._oauth_state_dir or not self._oauth_state_dir.exists():
+            return False
+        return any(self._oauth_state_dir.iterdir())
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         path = request.url.path
 
-        # Block reconnaissance endpoints
-        for blocked in self._blocked_paths:
-            if path.startswith(blocked):
-                return Response(status_code=404)
+        # Block /register if a client is already registered.
+        # First-time setup needs it, but after that lock the door.
+        if path == "/register" and self._has_registered_clients():
+            return Response(status_code=404)
 
         # Rate limit unauthenticated requests by IP
         if "authorization" not in {k.lower() for k in request.headers.keys()}:

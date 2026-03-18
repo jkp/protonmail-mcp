@@ -405,7 +405,10 @@ def main() -> None:
                 transport="http",
                 stateless_http=True,
             )
-            app.add_middleware(SecurityMiddleware)
+            app.add_middleware(
+                SecurityMiddleware,
+                oauth_state_dir=settings.oauth_state_dir,
+            )
 
             uvicorn.run(
                 app,

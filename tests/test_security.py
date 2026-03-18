@@ -1,5 +1,8 @@
 """Tests for security hardening middleware."""
 
+import tempfile
+from pathlib import Path
+
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -10,7 +13,10 @@ from starlette.testclient import TestClient
 from email_mcp.security import SecurityMiddleware
 
 
-def _make_app(rate_limit_rpm: int = 60) -> Starlette:
+def _make_app(
+    rate_limit_rpm: int = 60,
+    oauth_state_dir: Path | None = None,
+) -> Starlette:
     """Build a minimal Starlette app with SecurityMiddleware."""
 
     async def homepage(request: Request) -> Response:
@@ -24,55 +30,83 @@ def _make_app(rate_limit_rpm: int = 60) -> Starlette:
         )
         return resp
 
-    async def catch_all(request: Request) -> Response:
-        """Catch-all so unmatched routes return 200, not Starlette's own 404."""
-        return JSONResponse({"fallthrough": True})
-
     app = Starlette(
         routes=[
             Route("/mcp", homepage, methods=["GET", "POST"]),
             Route("/register", homepage, methods=["GET", "POST"]),
-            Route("/.well-known/{path:path}", catch_all),
+            Route("/.well-known/{path:path}", homepage),
             Route("/auth-fail", auth_fail),
         ],
     )
-    app.add_middleware(SecurityMiddleware, rate_limit_rpm=rate_limit_rpm)
+    app.add_middleware(
+        SecurityMiddleware,
+        rate_limit_rpm=rate_limit_rpm,
+        oauth_state_dir=oauth_state_dir,
+    )
     return app
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(_make_app())
+def oauth_dir(tmp_path: Path) -> Path:
+    """OAuth state dir with a registered client."""
+    state_dir = tmp_path / "oauth"
+    state_dir.mkdir()
+    (state_dir / "client_abc.json").write_text("{}")
+    return state_dir
 
 
-class TestBlockedEndpoints:
-    """Blocked reconnaissance endpoints return 404."""
+@pytest.fixture
+def client(oauth_dir: Path) -> TestClient:
+    return TestClient(_make_app(oauth_state_dir=oauth_dir))
 
-    def test_register_returns_404(self, client: TestClient) -> None:
-        resp = client.post("/register", json={"redirect_uris": ["https://evil.com"]})
+
+class TestRegistrationBlocking:
+    """Registration is blocked after first client registers."""
+
+    def test_register_blocked_when_clients_exist(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/register", json={"redirect_uris": ["https://evil.com"]}
+        )
         assert resp.status_code == 404
 
-    def test_well_known_oauth_server_returns_404(self, client: TestClient) -> None:
+    def test_register_allowed_when_no_clients(self) -> None:
+        """First-time setup: /register works with empty oauth dir."""
+        empty_dir = Path(tempfile.mkdtemp()) / "oauth"
+        empty_dir.mkdir()
+        app = _make_app(oauth_state_dir=empty_dir)
+        c = TestClient(app)
+        resp = c.post("/register", json={"redirect_uris": ["https://ok.com"]})
+        assert resp.status_code == 200
+
+    def test_register_allowed_when_no_oauth_dir(self) -> None:
+        """No oauth_state_dir configured: /register passes through."""
+        app = _make_app(oauth_state_dir=None)
+        c = TestClient(app)
+        resp = c.post("/register", json={})
+        assert resp.status_code == 200
+
+
+class TestWellKnownEndpoints:
+    """/.well-known/ endpoints pass through (needed for OAuth discovery)."""
+
+    def test_well_known_oauth_server_allowed(
+        self, client: TestClient
+    ) -> None:
         resp = client.get("/.well-known/oauth-authorization-server")
-        assert resp.status_code == 404
+        assert resp.status_code == 200
 
-    def test_well_known_oauth_resource_returns_404(self, client: TestClient) -> None:
+    def test_well_known_resource_allowed(self, client: TestClient) -> None:
         resp = client.get("/.well-known/oauth-protected-resource")
-        assert resp.status_code == 404
-
-    def test_well_known_prefix_blocked(self, client: TestClient) -> None:
-        """Any path under /.well-known/ should be blocked."""
-        resp = client.get("/.well-known/something-else")
-        assert resp.status_code == 404
+        assert resp.status_code == 200
 
 
 class TestServerHeaderStripping:
-    """Server identification headers are removed."""
-
     def test_no_server_header(self, client: TestClient) -> None:
         resp = client.post(
             "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            json={},
             headers={"Authorization": "Bearer test"},
         )
         assert "server" not in resp.headers
@@ -87,46 +121,36 @@ class TestServerHeaderStripping:
 
 
 class TestSecurityHeaders:
-    """Security headers are added to all responses."""
-
     def test_x_content_type_options(self, client: TestClient) -> None:
         resp = client.post(
-            "/mcp",
-            json={},
-            headers={"Authorization": "Bearer test"},
+            "/mcp", json={}, headers={"Authorization": "Bearer test"}
         )
         assert resp.headers.get("x-content-type-options") == "nosniff"
 
     def test_x_frame_options(self, client: TestClient) -> None:
         resp = client.post(
-            "/mcp",
-            json={},
-            headers={"Authorization": "Bearer test"},
+            "/mcp", json={}, headers={"Authorization": "Bearer test"}
         )
         assert resp.headers.get("x-frame-options") == "DENY"
 
     def test_referrer_policy(self, client: TestClient) -> None:
         resp = client.post(
-            "/mcp",
-            json={},
-            headers={"Authorization": "Bearer test"},
+            "/mcp", json={}, headers={"Authorization": "Bearer test"}
         )
         assert resp.headers.get("referrer-policy") == "no-referrer"
 
     def test_cache_control(self, client: TestClient) -> None:
         resp = client.post(
-            "/mcp",
-            json={},
-            headers={"Authorization": "Bearer test"},
+            "/mcp", json={}, headers={"Authorization": "Bearer test"}
         )
         assert resp.headers.get("cache-control") == "no-store"
 
 
 class TestAuthErrorMinimisation:
-    """Auth errors have minimal detail in WWW-Authenticate."""
-
     def test_www_authenticate_stripped(self, client: TestClient) -> None:
-        resp = client.get("/auth-fail", headers={"Authorization": "Bearer test"})
+        resp = client.get(
+            "/auth-fail", headers={"Authorization": "Bearer test"}
+        )
         assert resp.status_code == 401
         www_auth = resp.headers.get("www-authenticate", "")
         assert "error_description" not in www_auth
@@ -134,22 +158,22 @@ class TestAuthErrorMinimisation:
 
 
 class TestRateLimiting:
-    """Unauthenticated requests are rate-limited."""
-
-    def test_unauthenticated_rate_limited(self) -> None:
-        app = _make_app(rate_limit_rpm=3)
-        client = TestClient(app)
+    def test_unauthenticated_rate_limited(self, oauth_dir: Path) -> None:
+        app = _make_app(rate_limit_rpm=3, oauth_state_dir=oauth_dir)
+        c = TestClient(app)
         for _ in range(3):
-            resp = client.post("/mcp", json={})
+            resp = c.post("/mcp", json={})
             assert resp.status_code == 200
-        resp = client.post("/mcp", json={})
+        resp = c.post("/mcp", json={})
         assert resp.status_code == 429
 
-    def test_authenticated_not_rate_limited(self) -> None:
-        app = _make_app(rate_limit_rpm=3)
-        client = TestClient(app)
+    def test_authenticated_not_rate_limited(
+        self, oauth_dir: Path
+    ) -> None:
+        app = _make_app(rate_limit_rpm=3, oauth_state_dir=oauth_dir)
+        c = TestClient(app)
         for _ in range(5):
-            resp = client.post(
+            resp = c.post(
                 "/mcp",
                 json={},
                 headers={"Authorization": "Bearer test"},
@@ -157,9 +181,7 @@ class TestRateLimiting:
             assert resp.status_code == 200
 
 
-class TestNormalTrafficPassesThrough:
-    """Non-blocked authenticated requests work normally."""
-
+class TestNormalTraffic:
     def test_mcp_endpoint_works(self, client: TestClient) -> None:
         resp = client.post(
             "/mcp",
