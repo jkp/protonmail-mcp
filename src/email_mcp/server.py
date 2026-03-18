@@ -84,14 +84,26 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         decryptor: ProtonDecryptor | None = None
         try:
             session_data = json.loads(settings.proton_session_file.read_text())
-            key_salts = session_data.get("key_salts", {})
+            passphrase = session_data.get("mailbox_passphrase", "")
+            if not passphrase:
+                # Fallback: derive from password + key salt (legacy sessions)
+                key_salts = session_data.get("key_salts", {})
+                user_data = await api.get_user()
+                user_key_id = user_data["Keys"][0]["ID"]
+                key_salt = key_salts.get(user_key_id)
+                if key_salt and settings.proton_password:
+                    passphrase = derive_mailbox_passphrase(
+                        settings.proton_password, key_salt
+                    )
+                elif settings.proton_password:
+                    passphrase = settings.proton_password
+                else:
+                    raise ValueError(
+                        "No mailbox_passphrase in session and no password configured. "
+                        "Re-run email-mcp-auth."
+                    )
             user_data = await api.get_user()
             user_key = user_data["Keys"][0]
-            key_salt = key_salts.get(user_key["ID"])
-            if key_salt:
-                passphrase = derive_mailbox_passphrase(settings.proton_password, key_salt)
-            else:
-                passphrase = settings.proton_password
             key_ring = ProtonKeyRing(user_key["PrivateKey"], passphrase)
 
             # Load address keys

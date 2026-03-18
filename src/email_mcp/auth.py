@@ -113,8 +113,9 @@ def main() -> None:
             scope = tfa.get("Scope", scope)
             print(f"Scope after 2FA: {scope}", file=sys.stderr)
 
-        # Step 4: Fetch key salts (requires full auth scope)
+        # Step 4: Fetch key salts and derive mailbox passphrase
         key_salts = {}
+        mailbox_passphrase = ""
         try:
             salts_resp = client.get(
                 "/core/v4/keys/salts",
@@ -129,15 +130,50 @@ def main() -> None:
                     key_salts[ks["ID"]] = ks.get("KeySalt")
                 print(f"Fetched {len(key_salts)} key salts", file=sys.stderr)
             else:
-                print(f"WARNING: Could not fetch key salts: {salts_resp.get('Error', salts_resp)}", file=sys.stderr)
+                print(
+                    f"WARNING: Could not fetch key salts: "
+                    f"{salts_resp.get('Error', salts_resp)}",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"WARNING: Key salts fetch failed: {e}", file=sys.stderr)
+
+        # Step 5: Fetch user key and derive passphrase
+        if key_salts:
+            try:
+                user_resp = client.get(
+                    "/core/v4/users",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "x-pm-uid": uid,
+                        **_headers(),
+                    },
+                ).json()
+                user_key = user_resp["User"]["Keys"][0]
+                key_salt = key_salts.get(user_key["ID"])
+                if key_salt:
+                    from email_mcp.crypto import derive_mailbox_passphrase
+
+                    mailbox_passphrase = derive_mailbox_passphrase(
+                        password, key_salt
+                    )
+                    print("Mailbox passphrase derived and cached.", file=sys.stderr)
+                else:
+                    print(
+                        "WARNING: No key salt for primary key — "
+                        "using raw password as passphrase.",
+                        file=sys.stderr,
+                    )
+                    mailbox_passphrase = password
+            except Exception as e:
+                print(f"WARNING: Passphrase derivation failed: {e}", file=sys.stderr)
 
     session = {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "uid": uid,
         "key_salts": key_salts,
+        "mailbox_passphrase": mailbox_passphrase,
     }
 
     out_path = settings.proton_session_file
@@ -145,6 +181,9 @@ def main() -> None:
     out_path.write_text(json.dumps(session, indent=2))
 
     print(f"Session saved to {out_path}", file=sys.stderr)
-    if key_salts:
-        print("Key salts stored in session file for message decryption.", file=sys.stderr)
-    print("NOTE: EMAIL_MCP_PROTON_PASSWORD must remain available at runtime for key derivation.", file=sys.stderr)
+    if mailbox_passphrase:
+        print(
+            "Mailbox passphrase cached in session file. "
+            "PASSWORD IS NO LONGER NEEDED AT RUNTIME.",
+            file=sys.stderr,
+        )
