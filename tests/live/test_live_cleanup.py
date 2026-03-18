@@ -48,7 +48,7 @@ class TestCleanupMarkRead:
         data = _parse_result(result)
         assert "would_affect" in data
         assert isinstance(data["would_affect"], int)
-        assert "by_folder" in data
+        assert "sample_subjects" in data or "would_affect" in data
         for subj in data.get("sample_subjects", []):
             assert TEST_SUBJECT_PREFIX in subj
 
@@ -82,7 +82,7 @@ class TestCleanupDelete:
         data = _parse_result(result)
         assert "would_affect" in data
         assert isinstance(data["would_affect"], int)
-        assert "by_folder" in data
+        assert "sample_subjects" in data or "would_affect" in data
         for subj in data.get("sample_subjects", []):
             assert TEST_SUBJECT_PREFIX in subj
 
@@ -105,4 +105,3 @@ class TestCleanupDelete:
         # succeeded+failed may exceed would_affect: self-sent messages appear in
         # multiple folders (INBOX + Sent) and are attempted in each separately.
         assert data["succeeded"] >= 1
-

@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,16 +19,20 @@ def db(tmp_path: Path) -> Database:
 def mock_api() -> MagicMock:
     api = MagicMock()
     api.get_latest_event_id = AsyncMock(return_value="event-000")
-    api.get_events = AsyncMock(return_value={
-        "EventID": "event-001",
-        "More": 0,
-        "Refresh": 0,
-        "Messages": [],
-    })
-    api.get_labels = AsyncMock(return_value=[
-        {"ID": "0", "Name": "Inbox", "Type": 3, "Color": None, "Order": 0},
-        {"ID": "6", "Name": "Archive", "Type": 3, "Color": None, "Order": 0},
-    ])
+    api.get_events = AsyncMock(
+        return_value={
+            "EventID": "event-001",
+            "More": 0,
+            "Refresh": 0,
+            "Messages": [],
+        }
+    )
+    api.get_labels = AsyncMock(
+        return_value=[
+            {"ID": "0", "Name": "Inbox", "Type": 3, "Color": None, "Order": 0},
+            {"ID": "6", "Name": "Archive", "Type": 3, "Color": None, "Order": 0},
+        ]
+    )
     api.get_messages = AsyncMock(return_value=([], 0))
     return api
 
@@ -77,9 +81,7 @@ class TestInitialSetup:
         await loop.initialise()
         mock_api.get_latest_event_id.assert_not_called()
 
-    async def test_syncs_labels_on_initialise(
-        self, loop: EventLoop, db: Database
-    ) -> None:
+    async def test_syncs_labels_on_initialise(self, loop: EventLoop, db: Database) -> None:
         await loop.initialise()
         labels = db.labels.all()
         names = {lb["name"] for lb in labels}
@@ -101,17 +103,13 @@ class TestMessageCreate:
         await loop._handle_message_event(event)
         assert db.messages.get("pm-001").unread is True
 
-    async def test_create_enqueues_body_fetch(
-        self, loop: EventLoop, db: Database
-    ) -> None:
+    async def test_create_enqueues_body_fetch(self, loop: EventLoop, db: Database) -> None:
         loop._enqueue_body_fetch = MagicMock()
         event = _make_message_event("pm-001", action=1)
         await loop._handle_message_event(event)
         loop._enqueue_body_fetch.assert_called_once_with("pm-001")
 
-    async def test_create_derives_folder_from_labels(
-        self, loop: EventLoop, db: Database
-    ) -> None:
+    async def test_create_derives_folder_from_labels(self, loop: EventLoop, db: Database) -> None:
         event = _make_message_event("pm-001", action=1, label_ids=["6"])
         await loop._handle_message_event(event)
         assert db.messages.get("pm-001").folder == "Archive"
@@ -120,31 +118,51 @@ class TestMessageCreate:
 class TestMessageDelete:
     async def test_delete_removes_message(self, loop: EventLoop, db: Database) -> None:
         # Insert first
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id="<1@ex.com>", subject="X",
-            sender_name="A", sender_email="a@ex.com", recipients=[],
-            date=int(time.time()), unread=False, label_ids=["0"],
-            folder="INBOX", size=0, has_attachments=False, body_indexed=False,
-        ))
+        db.messages.upsert(
+            MessageRow(
+                pm_id="pm-001",
+                message_id="<1@ex.com>",
+                subject="X",
+                sender_name="A",
+                sender_email="a@ex.com",
+                recipients=[],
+                date=int(time.time()),
+                unread=False,
+                label_ids=["0"],
+                folder="INBOX",
+                size=0,
+                has_attachments=False,
+                body_indexed=False,
+            )
+        )
         event = {"ID": "pm-001", "Action": 0}
         await loop._handle_message_event(event)
         assert db.messages.get("pm-001") is None
 
-    async def test_delete_nonexistent_is_noop(
-        self, loop: EventLoop, db: Database
-    ) -> None:
+    async def test_delete_nonexistent_is_noop(self, loop: EventLoop, db: Database) -> None:
         event = {"ID": "does-not-exist", "Action": 0}
         await loop._handle_message_event(event)  # should not raise
 
 
 class TestMessageUpdate:
     async def test_update_changes_folder(self, loop: EventLoop, db: Database) -> None:
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id="<1@ex.com>", subject="X",
-            sender_name="A", sender_email="a@ex.com", recipients=[],
-            date=int(time.time()), unread=True, label_ids=["0"],
-            folder="INBOX", size=0, has_attachments=False, body_indexed=False,
-        ))
+        db.messages.upsert(
+            MessageRow(
+                pm_id="pm-001",
+                message_id="<1@ex.com>",
+                subject="X",
+                sender_name="A",
+                sender_email="a@ex.com",
+                recipients=[],
+                date=int(time.time()),
+                unread=True,
+                label_ids=["0"],
+                folder="INBOX",
+                size=0,
+                has_attachments=False,
+                body_indexed=False,
+            )
+        )
         event = _make_message_event("pm-001", action=2, label_ids=["6"], unread=0)
         await loop._handle_message_event(event)
         msg = db.messages.get("pm-001")
@@ -152,12 +170,23 @@ class TestMessageUpdate:
         assert msg.unread is False
 
     async def test_update_flags_only(self, loop: EventLoop, db: Database) -> None:
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id="<1@ex.com>", subject="X",
-            sender_name="A", sender_email="a@ex.com", recipients=[],
-            date=int(time.time()), unread=True, label_ids=["0"],
-            folder="INBOX", size=0, has_attachments=False, body_indexed=False,
-        ))
+        db.messages.upsert(
+            MessageRow(
+                pm_id="pm-001",
+                message_id="<1@ex.com>",
+                subject="X",
+                sender_name="A",
+                sender_email="a@ex.com",
+                recipients=[],
+                date=int(time.time()),
+                unread=True,
+                label_ids=["0"],
+                folder="INBOX",
+                size=0,
+                has_attachments=False,
+                body_indexed=False,
+            )
+        )
         event = _make_message_event("pm-001", action=3, label_ids=["0"], unread=0)
         await loop._handle_message_event(event)
         assert db.messages.get("pm-001").unread is False

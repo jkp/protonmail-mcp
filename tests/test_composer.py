@@ -143,7 +143,9 @@ class TestBuildForward:
         original["Message-ID"] = "<orig@example.com>"
         original["Date"] = "Mon, 10 Mar 2025 12:00:00 +0000"
         original.set_content("Body")
-        original.add_attachment(b"data", maintype="application", subtype="octet-stream", filename="file.bin")
+        original.add_attachment(
+            b"data", maintype="application", subtype="octet-stream", filename="file.bin"
+        )
 
         fwd = build_forward(original, "charlie@example.com", "FYI", _BOB)
         attachments = list(fwd.iter_attachments())

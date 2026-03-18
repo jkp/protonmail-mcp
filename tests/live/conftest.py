@@ -50,9 +50,7 @@ def _smtp_available() -> bool:
     """Check if SMTP is available by testing TCP connectivity to Bridge."""
     try:
         settings = Settings()
-        sock = socket.create_connection(
-            (settings.smtp_host, settings.smtp_port), timeout=5
-        )
+        sock = socket.create_connection((settings.smtp_host, settings.smtp_port), timeout=5)
         sock.close()
         return True
     except (OSError, TimeoutError):
@@ -74,15 +72,9 @@ _SMTP_OK = _smtp_available()
 _MAILDIR_OK = _maildir_available()
 
 live = pytest.mark.live
-skip_no_maildir = pytest.mark.skipif(
-    not _MAILDIR_OK, reason="Maildir not available"
-)
-skip_no_smtp = pytest.mark.skipif(
-    not _SMTP_OK, reason="SMTP not available"
-)
-skip_no_notmuch = pytest.mark.skipif(
-    not _NOTMUCH_OK, reason="notmuch not available"
-)
+skip_no_maildir = pytest.mark.skipif(not _MAILDIR_OK, reason="Maildir not available")
+skip_no_smtp = pytest.mark.skipif(not _SMTP_OK, reason="SMTP not available")
+skip_no_notmuch = pytest.mark.skipif(not _NOTMUCH_OK, reason="notmuch not available")
 
 
 def _parse_result(result: Any) -> Any:
@@ -136,9 +128,7 @@ async def poll_for_email(
         except Exception:
             pass
 
-        result = await client.call_tool(
-            "list_emails", {"folder": folder, "limit": 50}
-        )
+        result = await client.call_tool("list_emails", {"folder": folder, "limit": 50})
         data = _parse_result(result)
         emails = data.get("emails", []) if isinstance(data, dict) else data
         for email in emails:
@@ -159,10 +149,7 @@ async def live_client():
         from fastmcp.server.middleware import AuthMiddleware
 
         original_middleware = list(mcp.middleware)
-        mcp.middleware = [
-            m for m in mcp.middleware
-            if not isinstance(m, AuthMiddleware)
-        ]
+        mcp.middleware = [m for m in mcp.middleware if not isinstance(m, AuthMiddleware)]
     except ImportError:
         original_middleware = None
 
@@ -172,5 +159,3 @@ async def live_client():
     finally:
         if original_middleware is not None:
             mcp.middleware = original_middleware
-
-

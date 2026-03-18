@@ -1,8 +1,6 @@
 """Tests for Gmail-style query → SQL translator."""
 
-import pytest
-
-from email_mcp.query_builder import ParsedQuery, build_query
+from email_mcp.query_builder import build_query
 
 
 class TestFromOperator:

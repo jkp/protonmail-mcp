@@ -5,7 +5,8 @@ from pathlib import Path
 from email_mcp.config import Settings
 
 
-def test_default_settings():
+def test_default_settings(monkeypatch):
+    monkeypatch.setenv("EMAIL_MCP_PROTON_PASSWORD", "")
     settings = Settings()
     assert settings.imap_host == "127.0.0.1"
     assert settings.imap_port == 1143

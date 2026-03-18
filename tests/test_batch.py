@@ -9,7 +9,9 @@ import pytest
 from email_mcp.db import Database, MessageRow
 
 
-def _make_row(pm_id: str, message_id: str, folder: str = "INBOX", unread: bool = True) -> MessageRow:
+def _make_row(
+    pm_id: str, message_id: str, folder: str = "INBOX", unread: bool = True
+) -> MessageRow:
     return MessageRow(
         pm_id=pm_id,
         message_id=message_id,
@@ -228,7 +230,7 @@ class TestSearchAndDelete:
 
         # Query that would match Trash too — Trash messages should be excluded
         result = await search_and_delete(query="*", dry_run=True)
-        subjects = result.get("sample_subjects", [])
+        result.get("sample_subjects", [])
         # Total should not include the pm-trash message
         assert result["would_affect"] == 3  # INBOX x2 + Sent x1
 

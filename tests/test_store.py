@@ -1,7 +1,5 @@
 """Tests for email_mcp.store — Maildir operations."""
 
-
-
 from email_mcp.store import (
     FLAG_FLAGGED,
     FLAG_SEEN,

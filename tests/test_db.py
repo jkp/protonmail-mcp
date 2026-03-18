@@ -1,12 +1,11 @@
 """Tests for the SQLite database layer (v4 architecture)."""
 
-import json
 import time
 from pathlib import Path
 
 import pytest
 
-from email_mcp.db import Database, MessageRow, SyncState
+from email_mcp.db import Database, MessageRow
 
 
 @pytest.fixture
@@ -18,9 +17,7 @@ class TestSchema:
     def test_tables_created(self, db: Database) -> None:
         tables = {
             row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert {"messages", "message_bodies", "labels", "sync_state"} <= tables
 
@@ -103,7 +100,10 @@ class TestMessages:
         db.messages.delete("does-not-exist")  # should not raise
 
     def test_recipients_roundtrip(self, db: Database) -> None:
-        recipients = [{"name": "Bob", "email": "bob@example.com"}, {"name": "Carol", "email": "carol@example.com"}]
+        recipients = [
+            {"name": "Bob", "email": "bob@example.com"},
+            {"name": "Carol", "email": "carol@example.com"},
+        ]
         db.messages.upsert(self._make_row(recipients=recipients))
         result = db.messages.get("pm-001")
         assert result.recipients == recipients
@@ -158,12 +158,23 @@ class TestMessages:
 class TestBodies:
     def test_insert_and_fts_search(self, db: Database) -> None:
         now = int(time.time())
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id="<1@ex.com>",
-            subject="Invoice", sender_name="Bob", sender_email="bob@ex.com",
-            recipients=[], date=now, unread=True, label_ids=["0"],
-            folder="INBOX", size=100, has_attachments=False, body_indexed=False,
-        ))
+        db.messages.upsert(
+            MessageRow(
+                pm_id="pm-001",
+                message_id="<1@ex.com>",
+                subject="Invoice",
+                sender_name="Bob",
+                sender_email="bob@ex.com",
+                recipients=[],
+                date=now,
+                unread=True,
+                label_ids=["0"],
+                folder="INBOX",
+                size=100,
+                has_attachments=False,
+                body_indexed=False,
+            )
+        )
         db.bodies.insert("pm-001", "Please find the invoice attached for services rendered")
         results = db.bodies.search("invoice services", limit=10)
         assert "pm-001" in results
@@ -174,12 +185,23 @@ class TestBodies:
 
     def test_delete_cascades(self, db: Database) -> None:
         now = int(time.time())
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id="<1@ex.com>",
-            subject="Test", sender_name="A", sender_email="a@ex.com",
-            recipients=[], date=now, unread=False, label_ids=[],
-            folder="INBOX", size=0, has_attachments=False, body_indexed=True,
-        ))
+        db.messages.upsert(
+            MessageRow(
+                pm_id="pm-001",
+                message_id="<1@ex.com>",
+                subject="Test",
+                sender_name="A",
+                sender_email="a@ex.com",
+                recipients=[],
+                date=now,
+                unread=False,
+                label_ids=[],
+                folder="INBOX",
+                size=0,
+                has_attachments=False,
+                body_indexed=True,
+            )
+        )
         db.bodies.insert("pm-001", "some body text")
         db.messages.delete("pm-001")
         results = db.bodies.search("body", limit=10)

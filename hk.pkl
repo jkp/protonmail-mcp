@@ -1,12 +1,19 @@
 amends "package://github.com/jdx/hk/releases/download/v1.24.0/hk@1.24.0#/Config.pkl"
-import "package://github.com/jdx/hk/releases/download/v1.24.0/hk@1.24.0#/Builtins.pkl"
 
 local linters = new Mapping<String, Step> {
-    ["ruff"] = Builtins.ruff
-    ["ruff_format"] = Builtins.ruff_format
+    ["ruff"] {
+        glob = List("*.py", "*.pyi")
+        check = "uv run ruff check --force-exclude {{files}}"
+        fix = "uv run ruff check --fix --force-exclude {{files}}"
+    }
+    ["ruff_format"] {
+        glob = List("*.py", "*.pyi")
+        check = "uv run ruff format --check --force-exclude {{files}}"
+        fix = "uv run ruff format --force-exclude {{files}}"
+    }
     ["ty"] {
-        types = List("python")
-        check = "uvx ty check {{files}}"
+        glob = List("*.py", "*.pyi")
+        check = "uvx ty check"
     }
 }
 
@@ -22,7 +29,7 @@ hooks {
         steps {
             ...linters
             ["pytest"] {
-                check = "uv run pytest -q --timeout=30"
+                check = "uv run pytest -q --timeout=30 --ignore=tests/live"
             }
         }
     }
@@ -34,7 +41,7 @@ hooks {
         steps {
             ...linters
             ["pytest"] {
-                check = "uv run pytest -q --timeout=30"
+                check = "uv run pytest -q --timeout=30 --ignore=tests/live"
             }
         }
     }

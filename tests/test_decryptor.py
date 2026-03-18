@@ -80,8 +80,20 @@ class TestFetchAndDecrypt:
         mock_api.get_message.return_value = _make_message(
             "enc",
             attachments=[
-                {"ID": "att-1", "Name": "doc.pdf", "Size": 1024, "MIMEType": "application/pdf", "KeyPackets": "abc"},
-                {"ID": "att-2", "Name": "img.jpg", "Size": 2048, "MIMEType": "image/jpeg", "KeyPackets": "def"},
+                {
+                    "ID": "att-1",
+                    "Name": "doc.pdf",
+                    "Size": 1024,
+                    "MIMEType": "application/pdf",
+                    "KeyPackets": "abc",
+                },
+                {
+                    "ID": "att-2",
+                    "Name": "img.jpg",
+                    "Size": 2048,
+                    "MIMEType": "image/jpeg",
+                    "KeyPackets": "def",
+                },
             ],
         )
 
@@ -155,8 +167,6 @@ class TestFetchAndDecryptBatch:
         active = 0
         max_active = 0
 
-        original_get = mock_api.get_message
-
         async def _tracked_get(pm_id):
             nonlocal active, max_active
             active += 1
@@ -167,8 +177,6 @@ class TestFetchAndDecryptBatch:
 
         mock_api.get_message = _tracked_get
 
-        await decryptor.fetch_and_decrypt_batch(
-            [f"msg-{i}" for i in range(20)], concurrency=5
-        )
+        await decryptor.fetch_and_decrypt_batch([f"msg-{i}" for i in range(20)], concurrency=5)
 
         assert max_active <= 5

@@ -10,22 +10,18 @@ pytestmark = [live, skip_no_maildir, skip_no_notmuch, pytest.mark.timeout(120)]
 
 class TestSearch:
     async def test_search_returns_list(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "tag:inbox", "limit": 5}
-        )
+        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 5})
         data = _parse_result(result)
         assert isinstance(data, list)
 
     async def test_search_result_has_required_fields(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "tag:inbox", "limit": 5}
-        )
+        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 5})
         data = _parse_result(result)
         if not data:
             pytest.skip("No search results to validate")
         for item in data:
             assert "message_id" in item
-            assert "folders" in item
+            assert "folder" in item
             assert "subject" in item
             assert "date" in item
             assert "authors" in item
@@ -36,9 +32,7 @@ class TestSearchReadBack:
 
     @pytest.fixture
     async def inbox_search_results(self, live_client: Client) -> list:
-        result = await live_client.call_tool(
-            "search", {"query": "tag:inbox", "limit": 10}
-        )
+        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 10})
         data = _parse_result(result)
         if len(data) < 5:
             pytest.skip("Need at least 5 search results for comprehensive test")
@@ -51,7 +45,7 @@ class TestSearchReadBack:
         failures = []
         for item in inbox_search_results:
             mid = item["message_id"]
-            folder = item["folders"][0] if item.get("folders") else ""
+            folder = item.get("folder", "")
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -73,7 +67,7 @@ class TestSearchReadBack:
         mismatches = []
         for item in inbox_search_results:
             mid = item["message_id"]
-            folder = item["folders"][0] if item.get("folders") else ""
+            folder = item.get("folder", "")
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -93,9 +87,7 @@ class TestSearchAcrossFolders:
     """Verify search works for emails in different folders."""
 
     async def test_archive_emails_are_readable(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "folder:Archive", "limit": 5}
-        )
+        result = await live_client.call_tool("search", {"query": "folder:Archive", "limit": 5})
         data = _parse_result(result)
         if not data:
             pytest.skip("No emails in Archive")
@@ -103,7 +95,7 @@ class TestSearchAcrossFolders:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folders"][0] if item.get("folders") else ""
+            folder = item.get("folder", "")
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -117,9 +109,7 @@ class TestSearchAcrossFolders:
         assert not failures, "Archive read failures:\n" + "\n".join(failures)
 
     async def test_sent_emails_are_readable(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "folder:Sent", "limit": 5}
-        )
+        result = await live_client.call_tool("search", {"query": "folder:Sent", "limit": 5})
         data = _parse_result(result)
         if not data:
             pytest.skip("No emails in Sent")
@@ -127,7 +117,7 @@ class TestSearchAcrossFolders:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folders"][0] if item.get("folders") else ""
+            folder = item.get("folder", "")
             try:
                 result = await live_client.call_tool(
                     "read_email", {"message_id": mid, "folder": folder}
@@ -144,12 +134,8 @@ class TestSearchAcrossFolders:
 class TestSearchAttachmentPipeline:
     """End-to-end: search for attachments -> list -> download."""
 
-    async def test_attachment_emails_have_listable_attachments(
-        self, live_client: Client
-    ) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "tag:attachment", "limit": 5}
-        )
+    async def test_attachment_emails_have_listable_attachments(self, live_client: Client) -> None:
+        result = await live_client.call_tool("search", {"query": "tag:attachment", "limit": 5})
         data = _parse_result(result)
         if not data:
             pytest.skip("No emails with attachment tag")
@@ -158,7 +144,7 @@ class TestSearchAttachmentPipeline:
         failures = []
         for item in data:
             mid = item["message_id"]
-            folder = item["folders"][0] if item.get("folders") else ""
+            folder = item.get("folder", "")
             try:
                 att_result = await live_client.call_tool(
                     "list_attachments", {"message_id": mid, "folder": folder}
@@ -179,16 +165,12 @@ class TestSearchAttachmentPipeline:
 
 class TestGmailStyleQueries:
     async def test_has_attachment(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "has:attachment", "limit": 3}
-        )
+        result = await live_client.call_tool("search", {"query": "has:attachment", "limit": 3})
         data = _parse_result(result)
         assert isinstance(data, list)
 
     async def test_is_unread(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "is:unread", "limit": 3}
-        )
+        result = await live_client.call_tool("search", {"query": "is:unread", "limit": 3})
         data = _parse_result(result)
         assert isinstance(data, list)
 
@@ -200,8 +182,6 @@ class TestGmailStyleQueries:
         assert isinstance(data, list)
 
     async def test_in_inbox(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "search", {"query": "in:inbox", "limit": 3}
-        )
+        result = await live_client.call_tool("search", {"query": "in:inbox", "limit": 3})
         data = _parse_result(result)
         assert isinstance(data, list)

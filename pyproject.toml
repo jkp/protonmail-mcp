@@ -57,5 +57,16 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["E501"]
 
-[tool.ty]
+[tool.ty.environment]
 python-version = "3.13"
+
+[tool.ty.src]
+exclude = ["tests"]
+
+[tool.ty.rules]
+# pgpy doesn't have type stubs; monkey-patched _passphrase attribute is intentional
+unresolved-attribute = "warn"
+# Mock assignments in tests and nullable arguments passed to typed functions
+invalid-argument-type = "warn"
+invalid-return-type = "warn"
+invalid-assignment = "warn"

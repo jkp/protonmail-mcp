@@ -1,6 +1,6 @@
 """Tests for the ProtonMail API client."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,8 +11,8 @@ from email_mcp.proton_api import (
     derive_folder,
 )
 
-
 # ── derive_folder ─────────────────────────────────────────────────────────────
+
 
 class TestDeriveFolder:
     def test_inbox(self) -> None:
@@ -38,8 +38,8 @@ class TestDeriveFolder:
         assert derive_folder(["5", "0"]) == "INBOX"
 
     def test_all_mail_only(self) -> None:
-        # "5" is All Mail — fallback when it's the only label
-        assert derive_folder(["5"]) == "All Mail"
+        # "5" is All Mail — excluded as virtual, returns None
+        assert derive_folder(["5"]) is None
 
     def test_unknown_label_returns_none(self) -> None:
         assert derive_folder([]) is None
@@ -50,6 +50,7 @@ class TestDeriveFolder:
 
 
 # ── ProtonClient ──────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def mock_http() -> MagicMock:
@@ -98,16 +99,27 @@ class TestProtonClient:
         )
 
     async def test_get_labels(self, api: ProtonClient) -> None:
-        api._request = AsyncMock(return_value={
-            "Code": 1000,
-            "Labels": [
-                {"ID": "0", "Name": "Inbox", "Type": 3},
-                {"ID": "6", "Name": "Archive", "Type": 3},
-            ],
-        })
+        api._request = AsyncMock(
+            side_effect=[
+                {
+                    "Code": 1000,
+                    "Labels": [
+                        {"ID": "custom1", "Name": "MyLabel", "Type": 3},
+                    ],
+                },
+                {
+                    "Code": 1000,
+                    "Labels": [
+                        {"ID": "0", "Name": "Inbox", "Type": 4},
+                        {"ID": "6", "Name": "Archive", "Type": 4},
+                    ],
+                },
+            ]
+        )
         labels = await api.get_labels()
-        assert len(labels) == 2
-        assert labels[0]["ID"] == "0"
+        assert len(labels) == 3
+        assert labels[0]["ID"] == "custom1"
+        assert labels[1]["ID"] == "0"
 
     async def test_get_events(self, api: ProtonClient) -> None:
         payload = {
@@ -119,17 +131,18 @@ class TestProtonClient:
         }
         api._request = AsyncMock(return_value=payload)
         result = await api.get_events("last-event-id")
-        api._request.assert_called_once_with("GET", "/mail/v4/events/last-event-id")
+        api._request.assert_called_once_with("GET", "/core/v4/events/last-event-id")
         assert result["EventID"] == "next-event-id"
 
     async def test_get_latest_event_id(self, api: ProtonClient) -> None:
         api._request = AsyncMock(return_value={"Code": 1000, "EventID": "abc123"})
         eid = await api.get_latest_event_id()
         assert eid == "abc123"
-        api._request.assert_called_once_with("GET", "/mail/v4/events/latest")
+        api._request.assert_called_once_with("GET", "/core/v4/events/latest")
 
     async def test_rate_limit_raises(self, api: ProtonClient) -> None:
         import httpx
+
         response = MagicMock(spec=httpx.Response)
         response.status_code = 429
         response.headers = {"Retry-After": "30"}
@@ -145,14 +158,16 @@ class TestProtonClient:
         assert "422" in str(exc_info.value) or "Invalid" in str(exc_info.value)
 
     async def test_get_message_metadata_page(self, api: ProtonClient) -> None:
-        api._request = AsyncMock(return_value={
-            "Code": 1000,
-            "Messages": [
-                {"ID": "pm-1", "Subject": "Hello", "LabelIDs": ["0"]},
-                {"ID": "pm-2", "Subject": "World", "LabelIDs": ["6"]},
-            ],
-            "Total": 2,
-        })
+        api._request = AsyncMock(
+            return_value={
+                "Code": 1000,
+                "Messages": [
+                    {"ID": "pm-1", "Subject": "Hello", "LabelIDs": ["0"]},
+                    {"ID": "pm-2", "Subject": "World", "LabelIDs": ["6"]},
+                ],
+                "Total": 2,
+            }
+        )
         msgs, total = await api.get_messages(page=0, page_size=150)
         assert len(msgs) == 2
         assert total == 2

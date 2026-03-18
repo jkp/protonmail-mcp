@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pgpy
+import pytest
 from pgpy.constants import (
     CompressionAlgorithm,
     HashAlgorithm,
@@ -10,10 +11,8 @@ from pgpy.constants import (
     PubKeyAlgorithm,
     SymmetricKeyAlgorithm,
 )
-import pytest
 
 from email_mcp.crypto import DecryptionError, ProtonKeyRing, derive_mailbox_passphrase
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,12 +21,16 @@ def _make_key(passphrase: str, name: str, email: str) -> tuple[str, str]:
     """Generate a PGPy key pair. Returns (armored_private_key, passphrase)."""
     key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
     uid = pgpy.PGPUID.new(name, email=email)
-    key.add_uid(uid, usage={
-        KeyFlags.EncryptCommunications,
-        KeyFlags.EncryptStorage,
-    }, hashes=[HashAlgorithm.SHA256],
-       ciphers=[SymmetricKeyAlgorithm.AES256],
-       compression=[CompressionAlgorithm.Uncompressed])
+    key.add_uid(
+        uid,
+        usage={
+            KeyFlags.EncryptCommunications,
+            KeyFlags.EncryptStorage,
+        },
+        hashes=[HashAlgorithm.SHA256],
+        ciphers=[SymmetricKeyAlgorithm.AES256],
+        compression=[CompressionAlgorithm.Uncompressed],
+    )
     key.protect(passphrase, SymmetricKeyAlgorithm.AES256, HashAlgorithm.SHA256)
     return str(key), passphrase
 
@@ -58,6 +61,7 @@ def second_key_pair() -> tuple[str, str]:
 class TestDeriveMailboxPassphrase:
     def test_returns_string(self):
         import base64
+
         salt_b64 = base64.b64encode(b"A" * 16).decode()
         result = derive_mailbox_passphrase("mypassword", salt_b64)
         assert isinstance(result, str)
@@ -65,6 +69,7 @@ class TestDeriveMailboxPassphrase:
 
     def test_deterministic(self):
         import base64
+
         salt_b64 = base64.b64encode(b"B" * 16).decode()
         a = derive_mailbox_passphrase("password123", salt_b64)
         b = derive_mailbox_passphrase("password123", salt_b64)
@@ -72,6 +77,7 @@ class TestDeriveMailboxPassphrase:
 
     def test_different_passwords_differ(self):
         import base64
+
         salt_b64 = base64.b64encode(b"C" * 16).decode()
         a = derive_mailbox_passphrase("password1", salt_b64)
         b = derive_mailbox_passphrase("password2", salt_b64)
@@ -79,6 +85,7 @@ class TestDeriveMailboxPassphrase:
 
     def test_different_salts_differ(self):
         import base64
+
         salt_a = base64.b64encode(b"D" * 16).decode()
         salt_b = base64.b64encode(b"E" * 16).decode()
         a = derive_mailbox_passphrase("password", salt_a)

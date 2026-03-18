@@ -26,16 +26,12 @@ class TestListFolders:
 
 class TestListEmails:
     async def test_returns_list_structure(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 5}
-        )
+        result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 5})
         emails = _parse_emails(result)
         assert isinstance(emails, list)
 
     async def test_email_has_required_fields(self, live_client: Client) -> None:
-        result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 50}
-        )
+        result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 50})
         emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX to validate")
@@ -48,18 +44,14 @@ class TestListEmails:
 
     async def test_list_50_emails(self, live_client: Client) -> None:
         """Validate that 50 real emails parse without crash."""
-        result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 50}
-        )
+        result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 50})
         emails = _parse_emails(result)
         assert isinstance(emails, list)
 
 
 class TestReadEmail:
     async def test_reads_first_email(self, live_client: Client) -> None:
-        list_result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 5}
-        )
+        list_result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 5})
         emails = _parse_emails(list_result)
         if not emails:
             pytest.skip("No emails in INBOX")
@@ -75,9 +67,7 @@ class TestReadEmail:
 
     async def test_no_raw_html_in_body(self, live_client: Client) -> None:
         """HTML emails should be converted to markdown."""
-        result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 20}
-        )
+        result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 20})
         emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX")
@@ -97,9 +87,7 @@ class TestReadEmail:
 
     async def test_read_multiple_emails(self, live_client: Client) -> None:
         """Read 10 emails and verify they all parse correctly."""
-        result = await live_client.call_tool(
-            "list_emails", {"folder": "INBOX", "limit": 10}
-        )
+        result = await live_client.call_tool("list_emails", {"folder": "INBOX", "limit": 10})
         emails = _parse_emails(result)
         if not emails:
             pytest.skip("No emails in INBOX")

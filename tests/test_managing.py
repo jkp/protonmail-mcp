@@ -119,19 +119,19 @@ class TestMoveEmail:
     async def test_move_to_trash(self, mock_api):
         from email_mcp.tools.managing import move_email
 
-        result = await move_email("<msg1@example.com>", "Trash")
+        await move_email("<msg1@example.com>", "Trash")
         mock_api.label_messages.assert_awaited_once_with(["pm-001"], "3")
 
     async def test_move_to_spam(self, mock_api):
         from email_mcp.tools.managing import move_email
 
-        result = await move_email("<msg1@example.com>", "Spam")
+        await move_email("<msg1@example.com>", "Spam")
         mock_api.label_messages.assert_awaited_once_with(["pm-001"], "4")
 
     async def test_move_to_inbox(self, mock_api):
         from email_mcp.tools.managing import move_email
 
-        result = await move_email("<archived@example.com>", "INBOX")
+        await move_email("<archived@example.com>", "INBOX")
         mock_api.label_messages.assert_awaited_once_with(["pm-archived"], "0")
 
     async def test_move_updates_sqlite(self, db):

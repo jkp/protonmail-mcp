@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -35,14 +35,18 @@ def _make_api_message(pm_id: str, label_ids: list[str] | None = None) -> dict:
 @pytest.fixture
 def mock_api() -> MagicMock:
     api = MagicMock()
-    api.get_labels = AsyncMock(return_value=[
-        {"ID": "0", "Name": "Inbox", "Type": 3, "Color": None, "Order": 0},
-        {"ID": "6", "Name": "Archive", "Type": 3, "Color": None, "Order": 0},
-    ])
-    api.get_messages = AsyncMock(return_value=(
-        [_make_api_message("pm-001"), _make_api_message("pm-002")],
-        2,
-    ))
+    api.get_labels = AsyncMock(
+        return_value=[
+            {"ID": "0", "Name": "Inbox", "Type": 3, "Color": None, "Order": 0},
+            {"ID": "6", "Name": "Archive", "Type": 3, "Color": None, "Order": 0},
+        ]
+    )
+    api.get_messages = AsyncMock(
+        return_value=(
+            [_make_api_message("pm-001"), _make_api_message("pm-002")],
+            2,
+        )
+    )
     api.get_latest_event_id = AsyncMock(return_value="event-start")
     return api
 
@@ -96,9 +100,7 @@ class TestInitialSync:
         assert db.messages.get("pm-003") is not None
         assert mock_api.get_messages.call_count == 2
 
-    async def test_marks_done_after_completion(
-        self, sync: InitialSync, db: Database
-    ) -> None:
+    async def test_marks_done_after_completion(self, sync: InitialSync, db: Database) -> None:
         await sync.run()
         assert db.sync_state.get("initial_sync_done") == "1"
 

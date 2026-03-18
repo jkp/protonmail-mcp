@@ -2,13 +2,12 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from email_mcp.ntfy import (
     NOTIFICATION_RULES,
-    NotifyRule,
     NtfyNotifier,
     NtfyProcessor,
 )
@@ -28,7 +27,9 @@ class TestNtfyNotifier:
     @patch("email_mcp.ntfy.urlopen")
     async def test_send_posts_to_url(self, mock_urlopen, notifier):
         mock_urlopen.return_value = MagicMock()
-        await notifier.send(title="Test", message="Something broke", priority="high", tags="warning")
+        await notifier.send(
+            title="Test", message="Something broke", priority="high", tags="warning"
+        )
         mock_urlopen.assert_called_once()
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == "https://ntfy.sh/test-topic"
@@ -62,7 +63,7 @@ class TestNtfyNotifier:
 class TestNtfyProcessor:
     def test_matching_event_triggers_notification(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "server.imap_connect_failed", "level": "warning"}
+            event_dict = {"event": "server.key_load_failed", "level": "warning"}
             result = processor(None, "warning", event_dict)
             assert result is event_dict
             mock_send.assert_called_once()
@@ -76,7 +77,11 @@ class TestNtfyProcessor:
 
     def test_debounce_suppresses_repeat(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "sync.error", "level": "error", "error": "mbsync failed"}
+            event_dict = {
+                "event": "server.bulk_reindex_failed",
+                "level": "error",
+                "error": "reindex failed",
+            }
             # First call — should send
             processor(None, "error", event_dict)
             assert mock_send.call_count == 1
@@ -87,31 +92,23 @@ class TestNtfyProcessor:
 
     def test_debounce_allows_after_window(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "sync.error", "level": "error", "error": "mbsync failed"}
+            event_dict = {
+                "event": "server.bulk_reindex_failed",
+                "level": "error",
+                "error": "reindex failed",
+            }
             # First call
             processor(None, "error", event_dict)
             assert mock_send.call_count == 1
 
             # Fake the last_sent time to be in the past
-            processor._last_sent["sync.error"] = time.monotonic() - 700
+            processor._last_sent["server.bulk_reindex_failed"] = time.monotonic() - 700
             processor(None, "error", event_dict)
             assert mock_send.call_count == 2
 
-    def test_idle_error_suppressed_when_backoff_low(self, processor):
-        with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "idle.error", "level": "warning", "backoff": 2}
-            processor(None, "warning", event_dict)
-            mock_send.assert_not_called()
-
-    def test_idle_error_triggers_when_backoff_high(self, processor):
-        with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "idle.error", "level": "warning", "backoff": 60}
-            processor(None, "warning", event_dict)
-            mock_send.assert_called_once()
-
     def test_startup_events_have_zero_debounce(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
-            event_dict = {"event": "server.imap_connect_failed", "level": "warning"}
+            event_dict = {"event": "server.key_load_failed", "level": "warning"}
             processor(None, "warning", event_dict)
             processor(None, "warning", event_dict)
             # Zero debounce — both should send
@@ -120,25 +117,25 @@ class TestNtfyProcessor:
     def test_message_formatting_includes_error(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
             event_dict = {
-                "event": "sync.error",
+                "event": "server.bulk_reindex_failed",
                 "level": "error",
-                "error": "mbsync failed: connection refused",
+                "error": "reindex failed: timeout",
                 "elapsed_s": 5.2,
             }
             processor(None, "error", event_dict)
             call_kwargs = mock_send.call_args
             title = call_kwargs[0][0]
             message = call_kwargs[0][1]
-            assert "Sync Error" in title
-            assert "mbsync failed: connection refused" in message
+            assert "Server Bulk Reindex Failed" in title
+            assert "reindex failed: timeout" in message
 
     def test_message_formatting_includes_message_id(self, processor):
         with patch.object(processor, "_schedule_send") as mock_send:
             event_dict = {
-                "event": "tool.archive.imap_failed",
+                "event": "server.api_auth_required",
                 "level": "error",
                 "message_id": "abc123@example.com",
-                "error": "Message not found",
+                "error": "Auth required",
             }
             processor(None, "error", event_dict)
             message = mock_send.call_args[0][1]
@@ -151,20 +148,18 @@ class TestNotificationRules:
         for event, rule in NOTIFICATION_RULES.items():
             assert rule.priority in valid, f"{event} has invalid priority {rule.priority}"
 
-    def test_startup_events_have_zero_debounce(self):
-        startup_events = [
-            "server.imap_connect_failed",
-            "server.full_sync_on_startup.failed",
-            "server.startup_sync.failed",
-            "server.idle_start_failed",
+    def test_infrastructure_events_have_zero_debounce(self):
+        infra_events = [
+            "server.key_load_failed",
+            "server.api_auth_required",
         ]
-        for event in startup_events:
+        for event in infra_events:
             assert event in NOTIFICATION_RULES
             assert NOTIFICATION_RULES[event].debounce_s == 0
 
-    def test_idle_error_has_min_backoff(self):
-        rule = NOTIFICATION_RULES["idle.error"]
-        assert rule.min_backoff > 0
+    def test_ready_event_exists(self):
+        assert "server.ready" in NOTIFICATION_RULES
+        assert NOTIFICATION_RULES["server.ready"].debounce_s == 0
 
 
 class TestIntegration:
@@ -174,7 +169,7 @@ class TestIntegration:
         notifier = NtfyNotifier(url="https://ntfy.sh/test")
         processor = NtfyProcessor(notifier)
 
-        event_dict = {"event": "server.imap_connect_failed", "level": "warning"}
+        event_dict = {"event": "server.key_load_failed", "level": "warning"}
         processor(None, "warning", event_dict)
 
         # Allow background task to complete

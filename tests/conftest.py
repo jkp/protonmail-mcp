@@ -119,12 +119,16 @@ def maildir(tmp_path: Path) -> Path:
         date="Thu, 13 Mar 2025 14:00:00 +0000",
     )
 
-    _populate_maildir(root, "INBOX", [
-        ("1710072000.msg1.localhost:2,S", msg1, "cur"),
-        ("1710147000.msg2.localhost:2,", msg2, "cur"),
-        ("1710228000.msg3.localhost:2,S", msg3_html, "cur"),
-        ("1710338400.msg4.localhost:2,S", msg4_attachment, "cur"),
-    ])
+    _populate_maildir(
+        root,
+        "INBOX",
+        [
+            ("1710072000.msg1.localhost:2,S", msg1, "cur"),
+            ("1710147000.msg2.localhost:2,", msg2, "cur"),
+            ("1710228000.msg3.localhost:2,S", msg3_html, "cur"),
+            ("1710338400.msg4.localhost:2,S", msg4_attachment, "cur"),
+        ],
+    )
 
     # Create Sent folder
     sent_msg = _make_email(
@@ -135,9 +139,13 @@ def maildir(tmp_path: Path) -> Path:
         body="Hey Alice!",
         date="Mon, 10 Mar 2025 13:00:00 +0000",
     )
-    _populate_maildir(root, "Sent", [
-        ("1710075600.sent1.localhost:2,S", sent_msg, "cur"),
-    ])
+    _populate_maildir(
+        root,
+        "Sent",
+        [
+            ("1710075600.sent1.localhost:2,S", sent_msg, "cur"),
+        ],
+    )
 
     # Create Archive folder (empty)
     (root / "Archive" / "cur").mkdir(parents=True)

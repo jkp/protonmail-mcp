@@ -16,22 +16,26 @@ def db(tmp_path: Path) -> Database:
     return Database(tmp_path / "test.db")
 
 
-def _insert_message(db: Database, pm_id: str, body_indexed: bool = False, folder: str = "INBOX") -> None:
-    db.messages.upsert(MessageRow(
-        pm_id=pm_id,
-        message_id=f"{pm_id}@example.com",
-        subject="Test",
-        sender_name="Alice",
-        sender_email="alice@example.com",
-        recipients=[],
-        date=int(time.time()),
-        unread=True,
-        label_ids=["0"],
-        folder=folder,
-        size=1024,
-        has_attachments=False,
-        body_indexed=body_indexed,
-    ))
+def _insert_message(
+    db: Database, pm_id: str, body_indexed: bool = False, folder: str = "INBOX"
+) -> None:
+    db.messages.upsert(
+        MessageRow(
+            pm_id=pm_id,
+            message_id=f"{pm_id}@example.com",
+            subject="Test",
+            sender_name="Alice",
+            sender_email="alice@example.com",
+            recipients=[],
+            date=int(time.time()),
+            unread=True,
+            label_ids=["0"],
+            folder=folder,
+            size=1024,
+            has_attachments=False,
+            body_indexed=body_indexed,
+        )
+    )
 
 
 @pytest.fixture
@@ -58,9 +62,7 @@ class TestSingleFetch:
         body = db.bodies.get("pm-001")
         assert body == "Hello, this is the email body."
 
-    async def test_marks_body_indexed(
-        self, indexer: BodyIndexer, db: Database
-    ) -> None:
+    async def test_marks_body_indexed(self, indexer: BodyIndexer, db: Database) -> None:
         _insert_message(db, "pm-001")
         await indexer._fetch_and_index("pm-001")
         assert db.messages.get("pm-001").body_indexed is True
@@ -101,9 +103,7 @@ class TestSingleFetch:
 
 
 class TestQueueProcessing:
-    async def test_processes_queued_items(
-        self, indexer: BodyIndexer, db: Database
-    ) -> None:
+    async def test_processes_queued_items(self, indexer: BodyIndexer, db: Database) -> None:
         _insert_message(db, "pm-001")
         _insert_message(db, "pm-002")
 
@@ -117,9 +117,7 @@ class TestQueueProcessing:
         assert db.messages.get("pm-001").body_indexed is True
         assert db.messages.get("pm-002").body_indexed is True
 
-    async def test_stops_on_sentinel(
-        self, indexer: BodyIndexer, db: Database
-    ) -> None:
+    async def test_stops_on_sentinel(self, indexer: BodyIndexer, db: Database) -> None:
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         queue.put_nowait(None)
         await asyncio.wait_for(indexer.run_queue(queue), timeout=1.0)
