@@ -51,7 +51,7 @@ def mock_model():
     """Mock sentence transformer that returns deterministic vectors."""
     model = MagicMock()
 
-    def _encode(texts, batch_size=64):
+    def _encode(texts, batch_size=64, show_progress_bar=True):
         # Return distinct vectors based on text content hash
         vecs = []
         for t in texts:
@@ -141,9 +141,7 @@ class TestUnembeddedQuery:
 
     def test_respects_priority_order(self, embedder, db):
         _insert_message(db, "pm-1", body="Archive msg")
-        db.execute(
-            "UPDATE messages SET folder = 'Archive' WHERE pm_id = 'pm-1'"
-        )
+        db.execute("UPDATE messages SET folder = 'Archive' WHERE pm_id = 'pm-1'")
         db.commit()
         _insert_message(db, "pm-2", body="Inbox msg")
 

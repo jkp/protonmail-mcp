@@ -41,9 +41,17 @@ class Embedder:
         if model is not None:
             self._model = model
         else:
+            import logging
+            import os
+
+            # Suppress noisy model load reports and tqdm progress bars
+            logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
             from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(model_name)
+            self._model.encode(["warmup"], show_progress_bar=False)
 
     def _ensure_table(self) -> None:
         """Create the vectors table if it doesn't exist."""
@@ -58,17 +66,9 @@ class Embedder:
             " USING vec0(pm_id TEXT PRIMARY KEY, embedding float[384])"
         )
         # Add embedded column if missing
-        existing = {
-            row[1]
-            for row in self._db.execute(
-                "PRAGMA table_info(messages)"
-            ).fetchall()
-        }
+        existing = {row[1] for row in self._db.execute("PRAGMA table_info(messages)").fetchall()}
         if "embedded" not in existing:
-            self._db.execute(
-                "ALTER TABLE messages ADD COLUMN embedded"
-                " INTEGER NOT NULL DEFAULT 0"
-            )
+            self._db.execute("ALTER TABLE messages ADD COLUMN embedded INTEGER NOT NULL DEFAULT 0")
             self._db.commit()
 
     def embed_batch(self, pm_ids: list[str]) -> int:
@@ -96,18 +96,18 @@ class Embedder:
         if not texts:
             return 0
 
-        vectors = self._model.encode(texts, batch_size=_BATCH_SIZE)
+        vectors = self._model.encode(
+            texts, batch_size=_BATCH_SIZE, show_progress_bar=False
+        )
 
         for pm_id, vec in zip(valid_ids, vectors):
             vec_f32 = np.asarray(vec, dtype=np.float32)
             self._db.execute(
-                "INSERT OR REPLACE INTO message_vectors"
-                " (pm_id, embedding) VALUES (?, ?)",
+                "INSERT OR REPLACE INTO message_vectors (pm_id, embedding) VALUES (?, ?)",
                 [pm_id, _serialize_f32(vec_f32)],
             )
             self._db.execute(
-                "UPDATE messages SET embedded = 1"
-                " WHERE pm_id = ?",
+                "UPDATE messages SET embedded = 1 WHERE pm_id = ?",
                 [pm_id],
             )
         self._db.commit()
@@ -115,7 +115,7 @@ class Embedder:
 
     def search(self, query: str, limit: int = 20) -> list[str]:
         """Semantic search. Returns pm_ids ranked by similarity."""
-        vec = self._model.encode([query], batch_size=1)
+        vec = self._model.encode([query], batch_size=1, show_progress_bar=False)
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         rows = self._db.execute(
@@ -141,7 +141,7 @@ class Embedder:
             params: Parameters for the WHERE clause.
             limit: Max results.
         """
-        vec = self._model.encode([query], batch_size=1)
+        vec = self._model.encode([query], batch_size=1, show_progress_bar=False)
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         sql = (
@@ -156,9 +156,7 @@ class Embedder:
         rows = self._db.execute(sql, all_params).fetchall()
         return [r[0] for r in rows]
 
-    def get_unembedded(
-        self, limit: int = 1000
-    ) -> list[str]:
+    def get_unembedded(self, limit: int = 1000) -> list[str]:
         """Get pm_ids that have bodies but aren't embedded yet.
 
         Returns in priority order: INBOX first, then other folders,
