@@ -63,8 +63,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
 
         # Strip server identification
-        response.headers.pop("server", None)
-        response.headers.pop("x-powered-by", None)
+        if "server" in response.headers:
+            del response.headers["server"]
+        if "x-powered-by" in response.headers:
+            del response.headers["x-powered-by"]
 
         # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
