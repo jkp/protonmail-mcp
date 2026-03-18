@@ -13,15 +13,11 @@ No Bridge IMAP dependency — all operations use the ProtonMail REST API directl
 """
 
 import asyncio
-import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
 from fastmcp import FastMCP
-
-# Suppress PGPy's TripleDES deprecation warning
-warnings.filterwarnings("ignore", message="TripleDES has been moved", category=DeprecationWarning)
 
 from email_mcp.config import Settings
 from email_mcp.db import Database
