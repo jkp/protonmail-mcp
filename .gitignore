@@ -38,3 +38,8 @@ Thumbs.db
 
 # Logs
 logs/
+*.log
+
+# Secrets / session state
+proton_session.json
+oauth/
