@@ -16,11 +16,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-# Endpoints that leak server metadata to unauthenticated users
+# Path prefixes that leak server metadata to unauthenticated users.
+# Uses startswith matching, so "/.well-known/" blocks all discovery endpoints.
 _BLOCKED_PATHS = {
     "/register",
-    "/.well-known/oauth-protected-resource",
-    "/.well-known/oauth-authorization-server",
+    "/.well-known/",
 }
 
 
