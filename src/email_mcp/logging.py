@@ -21,14 +21,14 @@ def configure_logging(
     interactive = sys.stderr.isatty()
 
     if interactive and log_file is not None:
-        # Route all logs to file, leave stderr clean for rich progress bars
+        # Route ALL logs to file, leave stderr clean for rich progress bars
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        logging.basicConfig(
-            format="%(message)s",
-            filename=str(log_file),
-            level=numeric_level,
-            force=True,
-        )
+        handler = logging.FileHandler(str(log_file))
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.root.handlers = [handler]
+        logging.root.setLevel(numeric_level)
+        # Also suppress httpx request logging in interactive mode
+        logging.getLogger("httpx").setLevel(logging.WARNING)
     else:
         logging.basicConfig(
             format="%(message)s",

@@ -1,4 +1,4 @@
-"""Interactive progress display for initial sync and body indexing.
+"""Interactive progress display for sync and body indexing.
 
 When stderr is a TTY, shows rich progress bars. Otherwise is a no-op so
 structured JSON logs flow through normally (MCP stdio mode).
@@ -16,7 +16,9 @@ def is_interactive() -> bool:
 
 
 class SyncProgress:
-    """Context manager that shows rich progress bars during initial sync.
+    """Context manager that shows rich progress bars during sync.
+
+    Only shows bars that have been activated via set_*_total().
 
     Usage:
         with SyncProgress() as progress:
@@ -54,11 +56,10 @@ class SyncProgress:
                 TaskProgressColumn(),
                 TimeElapsedColumn(),
                 TimeRemainingColumn(),
+                console=__import__("rich.console", fromlist=["Console"]).Console(stderr=True),
                 refresh_per_second=4,
             )
             self._progress.start()
-            self._meta_task = self._progress.add_task("Syncing metadata ", total=None)
-            self._body_task = self._progress.add_task("Indexing bodies  ", total=None, visible=False)
         return self
 
     def __exit__(
@@ -71,8 +72,11 @@ class SyncProgress:
             self._progress.stop()
 
     def set_metadata_total(self, total: int) -> None:
-        if self._progress and self._meta_task is not None:
-            self._progress.update(self._meta_task, total=total)
+        if self._progress:
+            if self._meta_task is None:
+                self._meta_task = self._progress.add_task("Syncing metadata", total=total)
+            else:
+                self._progress.update(self._meta_task, total=total)
 
     def advance_metadata(self, n: int = 1) -> None:
         if self._progress and self._meta_task is not None:
@@ -80,11 +84,14 @@ class SyncProgress:
 
     def metadata_done(self) -> None:
         if self._progress and self._meta_task is not None:
-            self._progress.update(self._meta_task, description="Metadata synced  ")
+            self._progress.update(self._meta_task, visible=False)
 
     def set_bodies_total(self, total: int) -> None:
-        if self._progress and self._body_task is not None:
-            self._progress.update(self._body_task, total=total, visible=True)
+        if self._progress:
+            if self._body_task is None:
+                self._body_task = self._progress.add_task("Indexing bodies", total=total)
+            else:
+                self._progress.update(self._body_task, total=total)
 
     def advance_bodies(self, n: int = 1) -> None:
         if self._progress and self._body_task is not None:
@@ -92,4 +99,4 @@ class SyncProgress:
 
     def bodies_done(self) -> None:
         if self._progress and self._body_task is not None:
-            self._progress.update(self._body_task, description="Bodies indexed   ")
+            self._progress.update(self._body_task, visible=False)
