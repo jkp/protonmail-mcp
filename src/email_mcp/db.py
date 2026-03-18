@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 # ── Schema ──────────────────────────────────────────────────────────────────
 
 _SCHEMA = """
@@ -105,6 +104,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 # ── Data classes ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class MessageRow:
     pm_id: str
@@ -120,20 +120,20 @@ class MessageRow:
     size: int | None
     has_attachments: bool
     body_indexed: bool
+    embedded: bool = False
     created_at: int = field(default_factory=lambda: int(time.time()))
     updated_at: int = field(default_factory=lambda: int(time.time()))
 
 
 # ── Accessors ────────────────────────────────────────────────────────────────
 
+
 class _SyncStateAccessor:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def get(self, key: str, default: str | None = None) -> str | None:
-        row = self._conn.execute(
-            "SELECT value FROM sync_state WHERE key = ?", [key]
-        ).fetchone()
+        row = self._conn.execute("SELECT value FROM sync_state WHERE key = ?", [key]).fetchone()
         return row[0] if row else default
 
     def set(self, key: str, value: str) -> None:
@@ -173,20 +173,27 @@ class _MessagesAccessor:
                 updated_at      = excluded.updated_at
             """,
             [
-                row.pm_id, row.message_id, row.subject,
-                row.sender_name, row.sender_email,
-                json.dumps(row.recipients), row.date, int(row.unread),
-                json.dumps(row.label_ids), row.folder, row.size,
-                int(row.has_attachments), int(row.body_indexed),
-                row.created_at, now,
+                row.pm_id,
+                row.message_id,
+                row.subject,
+                row.sender_name,
+                row.sender_email,
+                json.dumps(row.recipients),
+                row.date,
+                int(row.unread),
+                json.dumps(row.label_ids),
+                row.folder,
+                row.size,
+                int(row.has_attachments),
+                int(row.body_indexed),
+                row.created_at,
+                now,
             ],
         )
         self._conn.commit()
 
     def get(self, pm_id: str) -> MessageRow | None:
-        row = self._conn.execute(
-            "SELECT * FROM messages WHERE pm_id = ?", [pm_id]
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM messages WHERE pm_id = ?", [pm_id]).fetchone()
         return _row_to_message(row) if row else None
 
     def delete(self, pm_id: str) -> None:
@@ -223,7 +230,8 @@ class _MessagesAccessor:
 
     def count_by_folder(self, folder: str) -> dict[str, int]:
         rows = self._conn.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN unread = 1 THEN 1 ELSE 0 END) FROM messages WHERE folder = ?",
+            "SELECT COUNT(*), SUM(CASE WHEN unread = 1 THEN 1 ELSE 0 END)"
+            " FROM messages WHERE folder = ?",
             [folder],
         ).fetchone()
         return {"total": rows[0] or 0, "unread": rows[1] or 0}
@@ -268,28 +276,58 @@ class _AttachmentsAccessor:
         for att in attachments:
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO attachments (pm_id, filename, size, mime_type, part_num, att_id, key_packets)
+                INSERT OR REPLACE INTO attachments
+                    (pm_id, filename, size, mime_type, part_num, att_id, key_packets)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                [pm_id, att["filename"], att.get("size", 0),
-                 att.get("mime_type", "application/octet-stream"),
-                 att.get("part_num", ""), att.get("att_id"), att.get("key_packets")],
+                [
+                    pm_id,
+                    att["filename"],
+                    att.get("size", 0),
+                    att.get("mime_type", "application/octet-stream"),
+                    att.get("part_num", ""),
+                    att.get("att_id"),
+                    att.get("key_packets"),
+                ],
             )
         self._conn.commit()
 
     def list_for_message(self, pm_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT filename, size, mime_type, part_num, att_id, key_packets FROM attachments WHERE pm_id = ? ORDER BY filename",
+            "SELECT filename, size, mime_type, part_num, att_id, key_packets"
+            " FROM attachments WHERE pm_id = ? ORDER BY filename",
             [pm_id],
         ).fetchall()
-        return [{"filename": r[0], "size": r[1], "mime_type": r[2], "part_num": r[3], "att_id": r[4], "key_packets": r[5]} for r in rows]
+        return [
+            {
+                "filename": r[0],
+                "size": r[1],
+                "mime_type": r[2],
+                "part_num": r[3],
+                "att_id": r[4],
+                "key_packets": r[5],
+            }
+            for r in rows
+        ]
 
     def get(self, pm_id: str, filename: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT filename, size, mime_type, part_num, att_id, key_packets FROM attachments WHERE pm_id = ? AND filename = ?",
+            "SELECT filename, size, mime_type, part_num, att_id, key_packets"
+            " FROM attachments WHERE pm_id = ? AND filename = ?",
             [pm_id, filename],
         ).fetchone()
-        return {"filename": row[0], "size": row[1], "mime_type": row[2], "part_num": row[3], "att_id": row[4], "key_packets": row[5]} if row else None
+        return (
+            {
+                "filename": row[0],
+                "size": row[1],
+                "mime_type": row[2],
+                "part_num": row[3],
+                "att_id": row[4],
+                "key_packets": row[5],
+            }
+            if row
+            else None
+        )
 
     def pm_ids_with_filename(self, pattern: str) -> list[str]:
         """Return pm_ids where any attachment filename matches the LIKE pattern."""
@@ -303,7 +341,9 @@ class _LabelsAccessor:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def upsert(self, id: str, name: str, type: int, color: str | None = None, order: int | None = None) -> None:
+    def upsert(
+        self, id: str, name: str, type: int, color: str | None = None, order: int | None = None
+    ) -> None:
         self._conn.execute(
             """
             INSERT INTO labels (id, name, type, color, display_order)
@@ -317,8 +357,12 @@ class _LabelsAccessor:
         self._conn.commit()
 
     def all(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute("SELECT id, name, type, color, display_order FROM labels").fetchall()
-        return [{"id": r[0], "name": r[1], "type": r[2], "color": r[3], "order": r[4]} for r in rows]
+        rows = self._conn.execute(
+            "SELECT id, name, type, color, display_order FROM labels"
+        ).fetchall()
+        return [
+            {"id": r[0], "name": r[1], "type": r[2], "color": r[3], "order": r[4]} for r in rows
+        ]
 
     def name_for_id(self, label_id: str) -> str | None:
         row = self._conn.execute("SELECT name FROM labels WHERE id = ?", [label_id]).fetchone()
@@ -326,6 +370,7 @@ class _LabelsAccessor:
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
+
 
 class Database:
     """SQLite database for v4 email-mcp.
@@ -366,8 +411,7 @@ class Database:
     def _migrate(self) -> None:
         """Add columns that may be missing from older databases."""
         existing = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(attachments)").fetchall()
+            row[1] for row in self._conn.execute("PRAGMA table_info(attachments)").fetchall()
         }
         for col, typedef in [("att_id", "TEXT"), ("key_packets", "TEXT")]:
             if col not in existing:
@@ -376,6 +420,7 @@ class Database:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _row_to_message(row: sqlite3.Row) -> MessageRow:
     return MessageRow(
@@ -392,6 +437,7 @@ def _row_to_message(row: sqlite3.Row) -> MessageRow:
         size=row["size"],
         has_attachments=bool(row["has_attachments"]),
         body_indexed=bool(row["body_indexed"]),
+        embedded=bool(row["embedded"]) if "embedded" in row.keys() else False,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

@@ -1,0 +1,182 @@
+"""Email embedding pipeline for semantic vector search.
+
+Encodes email content (sender + subject + body) into vectors using
+sentence-transformers, stores in sqlite-vec for similarity search.
+
+Downstream of body indexer: only embeds messages with body_indexed=1.
+"""
+
+from __future__ import annotations
+
+import struct
+from typing import Any
+
+import numpy as np
+import structlog
+
+from email_mcp.db import Database
+
+logger = structlog.get_logger(__name__)
+
+_BATCH_SIZE = 64
+_MAX_BODY_CHARS = 2000
+
+
+def _serialize_f32(vector: np.ndarray) -> bytes:
+    """Serialize a float32 numpy array to bytes for sqlite-vec."""
+    return struct.pack(f"{len(vector)}f", *vector)
+
+
+class Embedder:
+    """Embed email content and search by vector similarity."""
+
+    def __init__(
+        self,
+        db: Database,
+        model: Any = None,
+        model_name: str = "all-MiniLM-L6-v2",
+    ) -> None:
+        self._db = db
+        self._ensure_table()
+        if model is not None:
+            self._model = model
+        else:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(model_name)
+
+    def _ensure_table(self) -> None:
+        """Create the vectors table if it doesn't exist."""
+        import sqlite_vec
+
+        self._db._conn.enable_load_extension(True)
+        sqlite_vec.load(self._db._conn)
+        self._db._conn.enable_load_extension(False)
+
+        self._db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS message_vectors"
+            " USING vec0(pm_id TEXT PRIMARY KEY, embedding float[384])"
+        )
+        # Add embedded column if missing
+        existing = {
+            row[1]
+            for row in self._db.execute(
+                "PRAGMA table_info(messages)"
+            ).fetchall()
+        }
+        if "embedded" not in existing:
+            self._db.execute(
+                "ALTER TABLE messages ADD COLUMN embedded"
+                " INTEGER NOT NULL DEFAULT 0"
+            )
+            self._db.commit()
+
+    def embed_batch(self, pm_ids: list[str]) -> int:
+        """Embed a batch of messages. Returns count of successfully embedded."""
+        texts = []
+        valid_ids = []
+
+        for pm_id in pm_ids:
+            body = self._db.bodies.get(pm_id)
+            if not body:
+                continue
+            msg = self._db.messages.get(pm_id)
+            if not msg:
+                continue
+
+            text = (
+                f"From: {msg.sender_name or ''}"
+                f" <{msg.sender_email or ''}>\n"
+                f"Subject: {msg.subject or ''}\n\n"
+                f"{body[:_MAX_BODY_CHARS]}"
+            )
+            texts.append(text)
+            valid_ids.append(pm_id)
+
+        if not texts:
+            return 0
+
+        vectors = self._model.encode(texts, batch_size=_BATCH_SIZE)
+
+        for pm_id, vec in zip(valid_ids, vectors):
+            vec_f32 = np.asarray(vec, dtype=np.float32)
+            self._db.execute(
+                "INSERT OR REPLACE INTO message_vectors"
+                " (pm_id, embedding) VALUES (?, ?)",
+                [pm_id, _serialize_f32(vec_f32)],
+            )
+            self._db.execute(
+                "UPDATE messages SET embedded = 1"
+                " WHERE pm_id = ?",
+                [pm_id],
+            )
+        self._db.commit()
+        return len(valid_ids)
+
+    def search(self, query: str, limit: int = 20) -> list[str]:
+        """Semantic search. Returns pm_ids ranked by similarity."""
+        vec = self._model.encode([query], batch_size=1)
+        query_vec = np.asarray(vec[0], dtype=np.float32)
+
+        rows = self._db.execute(
+            "SELECT pm_id, distance FROM message_vectors"
+            " WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            [_serialize_f32(query_vec), limit],
+        ).fetchall()
+
+        return [r[0] for r in rows]
+
+    def search_with_filters(
+        self,
+        query: str,
+        where_clause: str = "1",
+        params: list[Any] | None = None,
+        limit: int = 20,
+    ) -> list[str]:
+        """Semantic search with SQL pre-filters.
+
+        Args:
+            query: Natural language query to embed.
+            where_clause: SQL WHERE clause for pre-filtering (e.g. "folder = ?").
+            params: Parameters for the WHERE clause.
+            limit: Max results.
+        """
+        vec = self._model.encode([query], batch_size=1)
+        query_vec = np.asarray(vec[0], dtype=np.float32)
+
+        sql = (
+            "SELECT v.pm_id, v.distance FROM message_vectors v"
+            " JOIN messages m ON m.pm_id = v.pm_id"
+            f" WHERE {where_clause}"
+            " AND v.embedding MATCH ?"
+            " ORDER BY v.distance LIMIT ?"
+        )
+        all_params = [*(params or []), _serialize_f32(query_vec), limit]
+
+        rows = self._db.execute(sql, all_params).fetchall()
+        return [r[0] for r in rows]
+
+    def get_unembedded(
+        self, limit: int = 1000
+    ) -> list[str]:
+        """Get pm_ids that have bodies but aren't embedded yet.
+
+        Returns in priority order: INBOX first, then other folders,
+        then NULL folder last.
+        """
+        rows = self._db.execute(
+            "SELECT pm_id FROM messages"
+            " WHERE body_indexed = 1 AND embedded = 0"
+            " ORDER BY"
+            "   CASE"
+            "     WHEN folder = 'INBOX' THEN 0"
+            "     WHEN folder = 'Sent' THEN 1"
+            "     WHEN folder = 'Drafts' THEN 2"
+            "     WHEN folder IS NOT NULL THEN 3"
+            "     ELSE 4"
+            "   END,"
+            "   date DESC"
+            " LIMIT ?",
+            [limit],
+        ).fetchall()
+        return [r[0] for r in rows]

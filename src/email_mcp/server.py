@@ -205,6 +205,41 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             asyncio.create_task(_bulk_reindex_bodies(), name="bulk_reindex_bodies")
         )
 
+        # 7c. Start embedding pipeline (downstream of body indexer)
+        embedder = None
+        try:
+            from email_mcp.embedder import Embedder
+
+            embedder = Embedder(db=db)
+            import email_mcp.tools.searching as searching_mod
+
+            searching_mod._embedder = embedder
+            logger.info("server.embedder_loaded")
+        except Exception:
+            logger.warning("server.embedder_load_failed", exc_info=True)
+
+        async def _embed_bodies() -> None:
+            """Background task: embed body-indexed messages for vector search."""
+            if not embedder:
+                return
+            while True:
+                pm_ids = embedder.get_unembedded(limit=200)
+                if not pm_ids:
+                    await asyncio.sleep(30)
+                    continue
+                count = await asyncio.to_thread(
+                    embedder.embed_batch, pm_ids
+                )
+                logger.info(
+                    "server.embed_progress",
+                    embedded=count,
+                    batch=len(pm_ids),
+                )
+
+        background_tasks.append(
+            asyncio.create_task(_embed_bodies(), name="embed_bodies")
+        )
+
         # 8. Start event loop background task
         background_tasks.append(asyncio.create_task(event_loop.run(), name="event_loop"))
 
