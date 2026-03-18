@@ -397,11 +397,22 @@ def main() -> None:
     )
     try:
         if settings.transport == "http":
-            mcp.run(
+            import uvicorn
+
+            from email_mcp.security import SecurityMiddleware
+
+            app = mcp.http_app(
                 transport="http",
+                stateless_http=True,
+            )
+            app.add_middleware(SecurityMiddleware)
+
+            uvicorn.run(
+                app,
                 host=settings.host,
                 port=settings.port,
-                stateless_http=True,
+                timeout_graceful_shutdown=0,
+                log_level="info",
             )
         else:
             mcp.run(log_level="WARNING")
