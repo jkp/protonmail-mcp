@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     filename    TEXT NOT NULL,
     size        INTEGER NOT NULL DEFAULT 0,
     mime_type   TEXT NOT NULL DEFAULT 'application/octet-stream',
-    part_num    TEXT NOT NULL,
+    part_num    TEXT NOT NULL DEFAULT '',
+    att_id      TEXT,
     PRIMARY KEY (pm_id, filename)
 );
 
@@ -266,27 +267,28 @@ class _AttachmentsAccessor:
         for att in attachments:
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO attachments (pm_id, filename, size, mime_type, part_num)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO attachments (pm_id, filename, size, mime_type, part_num, att_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [pm_id, att["filename"], att.get("size", 0),
-                 att.get("mime_type", "application/octet-stream"), att["part_num"]],
+                 att.get("mime_type", "application/octet-stream"),
+                 att.get("part_num", ""), att.get("att_id")],
             )
         self._conn.commit()
 
     def list_for_message(self, pm_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT filename, size, mime_type, part_num FROM attachments WHERE pm_id = ? ORDER BY filename",
+            "SELECT filename, size, mime_type, part_num, att_id FROM attachments WHERE pm_id = ? ORDER BY filename",
             [pm_id],
         ).fetchall()
-        return [{"filename": r[0], "size": r[1], "mime_type": r[2], "part_num": r[3]} for r in rows]
+        return [{"filename": r[0], "size": r[1], "mime_type": r[2], "part_num": r[3], "att_id": r[4]} for r in rows]
 
     def get(self, pm_id: str, filename: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT filename, size, mime_type, part_num FROM attachments WHERE pm_id = ? AND filename = ?",
+            "SELECT filename, size, mime_type, part_num, att_id FROM attachments WHERE pm_id = ? AND filename = ?",
             [pm_id, filename],
         ).fetchone()
-        return {"filename": row[0], "size": row[1], "mime_type": row[2], "part_num": row[3]} if row else None
+        return {"filename": row[0], "size": row[1], "mime_type": row[2], "part_num": row[3], "att_id": row[4]} if row else None
 
     def pm_ids_with_filename(self, pattern: str) -> list[str]:
         """Return pm_ids where any attachment filename matches the LIKE pattern."""

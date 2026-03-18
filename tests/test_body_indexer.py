@@ -3,7 +3,7 @@
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,10 +16,10 @@ def db(tmp_path: Path) -> Database:
     return Database(tmp_path / "test.db")
 
 
-def _insert_message(db: Database, pm_id: str, message_id: str, body_indexed: bool = False) -> None:
+def _insert_message(db: Database, pm_id: str, body_indexed: bool = False, folder: str = "INBOX") -> None:
     db.messages.upsert(MessageRow(
         pm_id=pm_id,
-        message_id=message_id,
+        message_id=f"{pm_id}@example.com",
         subject="Test",
         sender_name="Alice",
         sender_email="alice@example.com",
@@ -27,7 +27,7 @@ def _insert_message(db: Database, pm_id: str, message_id: str, body_indexed: boo
         date=int(time.time()),
         unread=True,
         label_ids=["0"],
-        folder="INBOX",
+        folder=folder,
         size=1024,
         has_attachments=False,
         body_indexed=body_indexed,
@@ -35,26 +35,25 @@ def _insert_message(db: Database, pm_id: str, message_id: str, body_indexed: boo
 
 
 @pytest.fixture
-def mock_imap() -> MagicMock:
-    imap = MagicMock()
-    imap.fetch_body_and_structure = AsyncMock(return_value=("Hello, this is the email body.", []))
-    imap.fetch_bodies_in_folder = AsyncMock(return_value={
-        "<msg1@example.com>": ("Body of message 1", []),
-        "<msg2@example.com>": ("Body of message 2", []),
-    })
-    return imap
+def mock_decryptor() -> MagicMock:
+    dec = MagicMock()
+    dec.fetch_and_decrypt = AsyncMock(return_value=("Hello, this is the email body.", []))
+    dec.fetch_and_decrypt_batch = AsyncMock(return_value={})
+    return dec
 
 
 @pytest.fixture
-def indexer(db: Database, mock_imap: MagicMock) -> BodyIndexer:
-    return BodyIndexer(db=db, imap=mock_imap, workers=2)
+def indexer(db: Database, mock_decryptor: MagicMock) -> BodyIndexer:
+    bi = BodyIndexer(db=db, decryptor=mock_decryptor, workers=2)
+    bi.retry_delays = [0, 0, 0]  # no sleep in tests
+    return bi
 
 
 class TestSingleFetch:
     async def test_indexes_body_for_queued_message(
         self, indexer: BodyIndexer, db: Database
     ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
+        _insert_message(db, "pm-001")
         await indexer._fetch_and_index("pm-001")
         body = db.bodies.get("pm-001")
         assert body == "Hello, this is the email body."
@@ -62,51 +61,51 @@ class TestSingleFetch:
     async def test_marks_body_indexed(
         self, indexer: BodyIndexer, db: Database
     ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
+        _insert_message(db, "pm-001")
         await indexer._fetch_and_index("pm-001")
         assert db.messages.get("pm-001").body_indexed is True
 
     async def test_skips_already_indexed(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
     ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>", body_indexed=True)
+        _insert_message(db, "pm-001", body_indexed=True)
         await indexer._fetch_and_index("pm-001")
-        mock_imap.fetch_body_and_structure.assert_not_called()
+        mock_decryptor.fetch_and_decrypt.assert_not_called()
 
-    async def test_handles_missing_message_id(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
+    async def test_handles_decrypt_error(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
     ) -> None:
-        """Message with no RFC2822 message_id — skip gracefully."""
-        db.messages.upsert(MessageRow(
-            pm_id="pm-001", message_id=None, subject="X",
-            sender_name="A", sender_email="a@ex.com", recipients=[],
-            date=int(time.time()), unread=False, label_ids=["0"],
-            folder="INBOX", size=0, has_attachments=False, body_indexed=False,
-        ))
-        await indexer._fetch_and_index("pm-001")
-        mock_imap.fetch_body_and_structure.assert_not_called()
-
-    async def test_handles_imap_fetch_error(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
-    ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
-        mock_imap.fetch_body_and_structure.side_effect = Exception("IMAP error")
+        _insert_message(db, "pm-001")
+        mock_decryptor.fetch_and_decrypt.side_effect = Exception("decrypt failed")
         await indexer._fetch_and_index("pm-001")  # should not raise
         assert db.messages.get("pm-001").body_indexed is False
 
     async def test_unknown_pm_id_is_noop(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
     ) -> None:
         await indexer._fetch_and_index("does-not-exist")
-        mock_imap.fetch_body_and_structure.assert_not_called()
+        mock_decryptor.fetch_and_decrypt.assert_not_called()
+
+    async def test_indexes_attachments(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
+    ) -> None:
+        _insert_message(db, "pm-001")
+        mock_decryptor.fetch_and_decrypt.return_value = (
+            "body text",
+            [{"att_id": "a1", "filename": "doc.pdf", "size": 1024, "mime_type": "application/pdf"}],
+        )
+        await indexer._fetch_and_index("pm-001")
+        atts = db.attachments.list_for_message("pm-001")
+        assert len(atts) == 1
+        assert atts[0]["filename"] == "doc.pdf"
 
 
 class TestQueueProcessing:
     async def test_processes_queued_items(
         self, indexer: BodyIndexer, db: Database
     ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
-        _insert_message(db, "pm-002", "<msg2@example.com>")
+        _insert_message(db, "pm-001")
+        _insert_message(db, "pm-002")
 
         queue: asyncio.Queue[str] = asyncio.Queue()
         queue.put_nowait("pm-001")
@@ -123,43 +122,54 @@ class TestQueueProcessing:
     ) -> None:
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         queue.put_nowait(None)
-        # Should return without hanging
         await asyncio.wait_for(indexer.run_queue(queue), timeout=1.0)
 
 
-class TestBulkFolderIndex:
-    async def test_indexes_all_messages_in_folder(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
+class TestBulkIndex:
+    async def test_indexes_all_unindexed(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
     ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
-        _insert_message(db, "pm-002", "<msg2@example.com>")
+        _insert_message(db, "pm-001")
+        _insert_message(db, "pm-002")
+        mock_decryptor.fetch_and_decrypt_batch.return_value = {
+            "pm-001": ("Body 1", []),
+            "pm-002": ("Body 2", []),
+        }
 
-        await indexer.index_folder("INBOX")
+        await indexer.index_unindexed()
 
-        assert db.bodies.get("pm-001") == "Body of message 1"
-        assert db.bodies.get("pm-002") == "Body of message 2"
-
-    async def test_bulk_fetch_called_with_folder(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
-    ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
-        await indexer.index_folder("INBOX")
-        mock_imap.fetch_bodies_in_folder.assert_called_once_with("INBOX")
-
-    async def test_marks_indexed_after_bulk(
-        self, indexer: BodyIndexer, db: Database
-    ) -> None:
-        _insert_message(db, "pm-001", "<msg1@example.com>")
-        _insert_message(db, "pm-002", "<msg2@example.com>")
-        await indexer.index_folder("INBOX")
+        assert db.bodies.get("pm-001") == "Body 1"
+        assert db.bodies.get("pm-002") == "Body 2"
         assert db.messages.get("pm-001").body_indexed is True
         assert db.messages.get("pm-002").body_indexed is True
 
-    async def test_skips_unmatched_message_ids(
-        self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
+    async def test_filters_by_folder(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
     ) -> None:
-        """Bodies returned by IMAP that don't match any pm_id are ignored."""
-        mock_imap.fetch_bodies_in_folder.return_value = {
-            "<unknown@example.com>": ("orphan body", []),
+        _insert_message(db, "pm-001", folder="INBOX")
+        _insert_message(db, "pm-002", folder="Archive")
+        mock_decryptor.fetch_and_decrypt_batch.return_value = {
+            "pm-001": ("Body 1", []),
         }
-        await indexer.index_folder("INBOX")  # no messages in db — should not raise
+
+        await indexer.index_unindexed(folder="INBOX")
+
+        # Only pm-001 should be passed to batch
+        call_args = mock_decryptor.fetch_and_decrypt_batch.call_args
+        assert "pm-001" in call_args[0][0]
+        assert "pm-002" not in call_args[0][0]
+
+    async def test_skips_already_indexed(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
+    ) -> None:
+        _insert_message(db, "pm-001", body_indexed=True)
+
+        await indexer.index_unindexed()
+
+        mock_decryptor.fetch_and_decrypt_batch.assert_not_called()
+
+    async def test_empty_is_noop(
+        self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock
+    ) -> None:
+        await indexer.index_unindexed()
+        mock_decryptor.fetch_and_decrypt_batch.assert_not_called()

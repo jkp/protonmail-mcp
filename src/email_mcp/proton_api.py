@@ -213,6 +213,18 @@ class ProtonClient:
     async def get_events(self, event_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/core/v4/events/{event_id}")
 
+    # ── User / keys ──────────────────────────────────────────────────────────
+
+    async def get_user(self) -> dict[str, Any]:
+        """GET /core/v4/users → User dict with Keys[] and other account info."""
+        data = await self._request("GET", "/core/v4/users")
+        return data["User"]
+
+    async def get_addresses(self) -> list[dict[str, Any]]:
+        """GET /core/v4/addresses → list of address dicts with Keys[]."""
+        data = await self._request("GET", "/core/v4/addresses")
+        return data["Addresses"]
+
     # ── Message metadata ──────────────────────────────────────────────────────
 
     async def get_messages(
@@ -224,6 +236,11 @@ class ProtonClient:
             params={"Page": page, "PageSize": page_size, "Sort": "Time", "Desc": 1},
         )
         return data["Messages"], data.get("Total", 0)
+
+    async def get_message(self, pm_id: str) -> dict[str, Any]:
+        """GET /mail/v4/messages/{pm_id} → full message with encrypted Body."""
+        data = await self._request("GET", f"/mail/v4/messages/{pm_id}")
+        return data["Message"]
 
     # ── Labels ────────────────────────────────────────────────────────────────
 

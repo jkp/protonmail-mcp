@@ -1,13 +1,14 @@
 """Background body indexer for v4 architecture.
 
-Fetches decrypted message bodies via Bridge IMAP and indexes them into
-SQLite FTS5. Two modes:
+Fetches encrypted message bodies from the ProtonMail API, decrypts them
+via ProtonDecryptor, and indexes plaintext into SQLite FTS5.
 
+Two modes:
   1. Queue-driven (ongoing): consumes pm_ids from an asyncio.Queue,
-     fetches each body individually via IMAP SEARCH + FETCH.
+     fetches and decrypts each body via the API.
 
-  2. Bulk folder (initial sync): fetches all bodies in a folder with
-     a single chunked IMAP FETCH command, correlates by Message-ID.
+  2. Bulk (initial sync / catchup): queries DB for all unindexed pm_ids,
+     fetches and decrypts in parallel batches.
 """
 
 from __future__ import annotations
@@ -18,16 +19,21 @@ from typing import Any
 import structlog
 
 from email_mcp.db import Database
+from email_mcp.decryptor import ProtonDecryptor
 
 logger = structlog.get_logger(__name__)
 
+_BATCH_SIZE = 200
+
 
 class BodyIndexer:
-    """Fetches and indexes message bodies from Bridge IMAP into SQLite FTS5."""
+    """Fetches and indexes message bodies into SQLite FTS5."""
 
-    def __init__(self, db: Database, imap: Any, workers: int = 3, progress: Any = None) -> None:
+    retry_delays: list[int] = [5, 15, 60]  # seconds between retries
+
+    def __init__(self, db: Database, decryptor: ProtonDecryptor, workers: int = 3, progress: Any = None) -> None:
         self._db = db
-        self._imap = imap
+        self._decryptor = decryptor
         self._workers = workers
         self._progress = progress
 
@@ -40,16 +46,11 @@ class BodyIndexer:
             return
         if row.body_indexed:
             return
-        if not row.message_id:
-            logger.warning("body_indexer.no_message_id", pm_id=pm_id)
-            return
 
-        delays = [5, 15, 60]  # seconds between retries
+        delays = self.retry_delays
         for attempt, delay in enumerate(delays + [None]):
             try:
-                body, attachments = await self._imap.fetch_body_and_structure(
-                    row.message_id, folder=row.folder
-                )
+                body, attachments = await self._decryptor.fetch_and_decrypt(pm_id)
                 self._db.bodies.insert(pm_id, body)
                 if attachments:
                     self._db.attachments.upsert_for_message(pm_id, attachments)
@@ -84,38 +85,47 @@ class BodyIndexer:
         tasks = [asyncio.create_task(self.run_queue(queue)) for _ in range(self._workers)]
         await asyncio.gather(*tasks)
 
-    # ── Bulk folder index (initial sync) ──────────────────────────────────────
+    # ── Bulk index (initial sync / catchup) ──────────────────────────────────
 
-    async def index_folder(self, folder: str) -> None:
-        """Bulk-fetch all bodies in a folder and index them.
+    async def index_unindexed(self, folder: str | None = None) -> None:
+        """Bulk-fetch and decrypt all unindexed message bodies.
 
-        Correlates IMAP bodies to SQLite rows by RFC 2822 Message-ID.
-        One IMAP command per 200-message chunk — efficient for initial import.
+        Queries DB for unindexed pm_ids, fetches in parallel batches via the
+        ProtonMail API, and indexes each body into FTS5.
+
+        Args:
+            folder: Optional folder filter. If None, indexes ALL unindexed messages.
         """
-        logger.info("body_indexer.index_folder.start", folder=folder)
-        bodies = await self._imap.fetch_bodies_in_folder(folder)
+        if folder:
+            rows = self._db.execute(
+                "SELECT pm_id FROM messages WHERE body_indexed = 0 AND folder = ?",
+                [folder],
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT pm_id FROM messages WHERE body_indexed = 0"
+            ).fetchall()
 
-        if not bodies:
-            logger.info("body_indexer.index_folder.empty", folder=folder)
+        pm_ids = [r[0] for r in rows]
+        if not pm_ids:
+            logger.info("body_indexer.index_unindexed.empty", folder=folder)
             return
 
-        # message_id → [pm_id, ...] (duplicates share the same body)
-        mid_to_pmids: dict[str, list[str]] = {}
-        for row in self._db.execute(
-            "SELECT pm_id, message_id FROM messages WHERE message_id IS NOT NULL"
-        ).fetchall():
-            mid_to_pmids.setdefault(row[1], []).append(row[0])
-
+        logger.info("body_indexer.index_unindexed.start", folder=folder, count=len(pm_ids))
         indexed = 0
-        for message_id, (body, attachments) in bodies.items():
-            pm_ids = mid_to_pmids.get(message_id)
-            if not pm_ids:
-                continue
-            for pm_id in pm_ids:
+
+        # Process in batches to avoid overwhelming the API
+        for i in range(0, len(pm_ids), _BATCH_SIZE):
+            batch = pm_ids[i : i + _BATCH_SIZE]
+            results = await self._decryptor.fetch_and_decrypt_batch(batch)
+
+            for pm_id, (body, attachments) in results.items():
                 self._db.bodies.insert(pm_id, body)
                 if attachments:
                     self._db.attachments.upsert_for_message(pm_id, attachments)
                 self._db.messages.mark_body_indexed(pm_id)
                 indexed += 1
+                if self._progress:
+                    self._progress.advance_bodies()
 
-        logger.info("body_indexer.index_folder.done", folder=folder, indexed=indexed, fetched=len(bodies), duplicates=indexed - len(bodies) if indexed > len(bodies) else 0)
+        logger.info("body_indexer.index_unindexed.done", folder=folder, indexed=indexed, total=len(pm_ids))
