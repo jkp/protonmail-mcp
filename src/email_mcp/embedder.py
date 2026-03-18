@@ -54,6 +54,11 @@ class Embedder:
             logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+            # Let PyTorch use multiple cores for inference
+            import torch
+
+            torch.set_num_threads(min(4, os.cpu_count() or 1))
+
             from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(model_name, trust_remote_code=True)
