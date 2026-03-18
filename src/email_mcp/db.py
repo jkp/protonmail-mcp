@@ -361,6 +361,18 @@ class Database:
     def _apply_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that may be missing from older databases."""
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(attachments)").fetchall()
+        }
+        for col, typedef in [("att_id", "TEXT"), ("key_packets", "TEXT")]:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} {typedef}")
+        self._conn.commit()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
