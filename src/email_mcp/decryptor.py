@@ -72,8 +72,8 @@ class ProtonDecryptor:
                 try:
                     body, atts = await self.fetch_and_decrypt(pm_id)
                     results[pm_id] = (body, atts)
-                except Exception:
-                    logger.debug("decryptor.batch_skip", pm_id=pm_id, exc_info=True)
+                except Exception as e:
+                    logger.warning("decryptor.batch_failed", pm_id=pm_id, error=str(e))
 
         await asyncio.gather(*[_fetch_one(pid) for pid in pm_ids])
         return results

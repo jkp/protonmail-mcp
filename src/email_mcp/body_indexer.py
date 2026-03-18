@@ -113,6 +113,7 @@ class BodyIndexer:
 
         logger.info("body_indexer.index_unindexed.start", folder=folder, count=len(pm_ids))
         indexed = 0
+        failed = 0
 
         # Process in batches to avoid overwhelming the API
         for i in range(0, len(pm_ids), _BATCH_SIZE):
@@ -128,4 +129,7 @@ class BodyIndexer:
                 if self._progress:
                     self._progress.advance_bodies()
 
-        logger.info("body_indexer.index_unindexed.done", folder=folder, indexed=indexed, total=len(pm_ids))
+            batch_failed = len(batch) - len(results)
+            failed += batch_failed
+
+        logger.info("body_indexer.index_unindexed.done", folder=folder, indexed=indexed, failed=failed, total=len(pm_ids))
