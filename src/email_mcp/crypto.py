@@ -1,0 +1,112 @@
+"""ProtonMail PGP key management and message decryption.
+
+Handles the full decryption chain:
+1. Derive mailbox passphrase from password + KeySalt (bcrypt)
+2. Load and unlock user/address PGP private keys
+3. Decrypt message bodies encrypted to those keys
+"""
+
+from __future__ import annotations
+
+import base64
+
+import bcrypt
+import pgpy
+
+from email_mcp.srp import _BCRYPT_B64, _STD_B64
+
+
+class DecryptionError(Exception):
+    """No available key could decrypt the message."""
+
+
+def derive_mailbox_passphrase(password: str, key_salt_b64: str) -> str:
+    """Derive the mailbox passphrase from login password and KeySalt.
+
+    ProtonMail's key passphrase derivation:
+      1. Base64-decode the KeySalt (16 bytes)
+      2. Encode salt for bcrypt: base64 with bcrypt alphabet, strip padding (22 chars)
+      3. bcrypt(password, "$2y$10$" + encoded_salt)
+      4. Take the last 31 characters of the bcrypt hash as the passphrase
+
+    This is different from SRP's _hash_password which applies PMHash expansion.
+    """
+    salt = base64.b64decode(key_salt_b64)
+    # Encode salt with bcrypt's custom base64 alphabet, strip padding
+    encoded_salt = base64.b64encode(salt).translate(
+        bytes.maketrans(_STD_B64, _BCRYPT_B64)
+    ).rstrip(b"=")
+    hashed = bcrypt.hashpw(password.encode("utf-8"), b"$2y$10$" + encoded_salt)
+    return hashed.decode("utf-8")[-31:]
+
+
+class ProtonKeyRing:
+    """Loads and caches unlocked PGP keys for message decryption.
+
+    Usage:
+        kr = ProtonKeyRing(user_key_armored, passphrase)
+        kr.add_address_key(addr_key_armored, encrypted_token)
+        plaintext = kr.decrypt(encrypted_body)
+    """
+
+    def __init__(self, user_key_armored: str, passphrase: str) -> None:
+        """Load and unlock the primary user key.
+
+        Args:
+            user_key_armored: Armored PGP private key from GET /core/v4/users.
+            passphrase: Mailbox passphrase from derive_mailbox_passphrase().
+        """
+        self._user_key = self._load_and_unlock(user_key_armored, passphrase)
+        self._address_keys: list[pgpy.PGPKey] = []
+
+    def add_address_key(self, armored_key: str, encrypted_token: str) -> None:
+        """Add an address key. The token (passphrase) is encrypted with the user key.
+
+        Args:
+            armored_key: Armored PGP private key from the address.
+            encrypted_token: PGP-encrypted passphrase for unlocking the address key.
+        """
+        # Decrypt the token using the user key to get the address key passphrase
+        token_passphrase = self._decrypt_with_key(self._user_key, encrypted_token)
+        addr_key = self._load_and_unlock(armored_key, token_passphrase)
+        self._address_keys.append(addr_key)
+
+    def decrypt(self, armored_pgp_message: str) -> str:
+        """Decrypt a PGP-encrypted message body.
+
+        Tries the user key first, then each address key.
+        Raises DecryptionError if no key can decrypt.
+        """
+        # Try user key first
+        try:
+            return self._decrypt_with_key(self._user_key, armored_pgp_message)
+        except Exception:
+            pass
+
+        # Try address keys
+        for addr_key in self._address_keys:
+            try:
+                return self._decrypt_with_key(addr_key, armored_pgp_message)
+            except Exception:
+                continue
+
+        raise DecryptionError("No available key could decrypt the message")
+
+    @staticmethod
+    def _load_and_unlock(armored_key: str, passphrase: str) -> pgpy.PGPKey:
+        """Load an armored PGP key and verify it can be unlocked."""
+        key, _ = pgpy.PGPKey.from_blob(armored_key)
+        # Verify the passphrase works by doing a test unlock
+        with key.unlock(passphrase):
+            pass
+        # Store passphrase for later use
+        key._passphrase = passphrase
+        return key
+
+    @staticmethod
+    def _decrypt_with_key(key: pgpy.PGPKey, armored_message: str) -> str:
+        """Decrypt an armored PGP message with the given key."""
+        msg = pgpy.PGPMessage.from_blob(armored_message)
+        with key.unlock(key._passphrase):
+            decrypted = key.decrypt(msg)
+        return str(decrypted.message)

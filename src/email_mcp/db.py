@@ -26,7 +26,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS messages (
     pm_id           TEXT PRIMARY KEY,
-    message_id      TEXT UNIQUE,
+    message_id      TEXT,
     subject         TEXT,
     sender_name     TEXT,
     sender_email    TEXT,
@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS labels (
     color   TEXT,
     display_order INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS attachments (
+    pm_id       TEXT NOT NULL REFERENCES messages(pm_id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    mime_type   TEXT NOT NULL DEFAULT 'application/octet-stream',
+    part_num    TEXT NOT NULL,
+    PRIMARY KEY (pm_id, filename)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_pm_id ON attachments(pm_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_filename ON attachments(filename);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -244,6 +256,46 @@ class _BodiesAccessor:
             return []
 
 
+class _AttachmentsAccessor:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def upsert_for_message(self, pm_id: str, attachments: list[dict[str, Any]]) -> None:
+        """Replace all attachment records for a message."""
+        self._conn.execute("DELETE FROM attachments WHERE pm_id = ?", [pm_id])
+        for att in attachments:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO attachments (pm_id, filename, size, mime_type, part_num)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [pm_id, att["filename"], att.get("size", 0),
+                 att.get("mime_type", "application/octet-stream"), att["part_num"]],
+            )
+        self._conn.commit()
+
+    def list_for_message(self, pm_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT filename, size, mime_type, part_num FROM attachments WHERE pm_id = ? ORDER BY filename",
+            [pm_id],
+        ).fetchall()
+        return [{"filename": r[0], "size": r[1], "mime_type": r[2], "part_num": r[3]} for r in rows]
+
+    def get(self, pm_id: str, filename: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT filename, size, mime_type, part_num FROM attachments WHERE pm_id = ? AND filename = ?",
+            [pm_id, filename],
+        ).fetchone()
+        return {"filename": row[0], "size": row[1], "mime_type": row[2], "part_num": row[3]} if row else None
+
+    def pm_ids_with_filename(self, pattern: str) -> list[str]:
+        """Return pm_ids where any attachment filename matches the LIKE pattern."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT pm_id FROM attachments WHERE filename LIKE ?", [pattern]
+        ).fetchall()
+        return [r[0] for r in rows]
+
+
 class _LabelsAccessor:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -291,6 +343,7 @@ class Database:
         self.sync_state = _SyncStateAccessor(self._conn)
         self.messages = _MessagesAccessor(self._conn)
         self.bodies = _BodiesAccessor(self._conn)
+        self.attachments = _AttachmentsAccessor(self._conn)
         self.labels = _LabelsAccessor(self._conn)
 
     def execute(self, sql: str, params: list[Any] | None = None) -> sqlite3.Cursor:

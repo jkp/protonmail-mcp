@@ -227,7 +227,7 @@ def _event_to_row(pm_id: str, msg: dict[str, Any], folder: str | None) -> Messag
     ]
     return MessageRow(
         pm_id=pm_id,
-        message_id=msg.get("ExternalID") or f"<{pm_id}@protonmail.com>",
+        message_id=(msg.get("ExternalID") or f"{pm_id}@protonmail.com").strip().strip("<>"),
         subject=msg.get("Subject"),
         sender_name=sender.get("Name"),
         sender_email=sender.get("Address"),

@@ -5,13 +5,79 @@ aioimaplib lacks STARTTLS support which ProtonMail Bridge requires.
 """
 
 import asyncio
+import base64
 import ssl
 import time
+from typing import Any
 
 import structlog
 from imapclient import IMAPClient
 
 logger = structlog.get_logger()
+
+
+def _parse_bodystructure(bs: Any, prefix: str = "") -> list[dict[str, Any]]:
+    """Recursively parse IMAP BODYSTRUCTURE, returning attachment metadata.
+
+    Each returned dict has: filename, size, mime_type, part_num.
+    Text parts (text/plain, text/html) are skipped.
+    """
+    if not bs or not isinstance(bs, (list, tuple)):
+        return []
+
+    attachments: list[dict[str, Any]] = []
+
+    # Multipart: first element is itself a list/tuple
+    if isinstance(bs[0], (list, tuple)):
+        part_idx = 1
+        for item in bs:
+            if isinstance(item, (list, tuple)):
+                num = f"{prefix}.{part_idx}" if prefix else str(part_idx)
+                attachments.extend(_parse_bodystructure(item, num))
+                part_idx += 1
+        return attachments
+
+    # Single part: (type, subtype, params, id, desc, encoding, size, ...)
+    if len(bs) < 7:
+        return []
+
+    def _decode(v: Any) -> str:
+        if isinstance(v, bytes):
+            return v.decode("utf-8", errors="replace")
+        return str(v) if v else ""
+
+    mime_type = f"{_decode(bs[0])}/{_decode(bs[1])}".lower()
+
+    # Skip inline text parts
+    if mime_type in ("text/plain", "text/html"):
+        return []
+
+    # Extract filename from content-type params (index 2)
+    filename: str | None = None
+    params = bs[2]
+    if isinstance(params, (list, tuple)):
+        for i in range(0, len(params) - 1, 2):
+            if isinstance(params[i], bytes) and params[i].lower() == b"name":
+                filename = _decode(params[i + 1])
+                break
+
+    # Also check content-disposition params (index 8 in extended BODYSTRUCTURE)
+    if not filename and len(bs) > 9 and isinstance(bs[9], (list, tuple)):
+        disp = bs[9]
+        if len(disp) > 1 and isinstance(disp[1], (list, tuple)):
+            dparams = disp[1]
+            for i in range(0, len(dparams) - 1, 2):
+                if isinstance(dparams[i], bytes) and dparams[i].lower() == b"filename":
+                    filename = _decode(dparams[i + 1])
+                    break
+
+    if not filename:
+        return []
+
+    size = bs[6] if isinstance(bs[6], int) else 0
+    part_num = prefix or "1"
+
+    return [{"filename": filename, "size": size, "mime_type": mime_type, "part_num": part_num}]
 
 
 class ImapError(Exception):
@@ -38,6 +104,7 @@ class ImapMutator:
         self.cert_path = cert_path
         self._client: IMAPClient | None = None
         self._tls_context: ssl.SSLContext | None = None
+        self._lock = asyncio.Lock()
         if cert_path:
             import os
 
@@ -69,15 +136,16 @@ class ImapMutator:
             self._client = None
 
     async def _ensure_connected(self) -> None:
-        """Reconnect if the connection is lost or dead."""
+        """Reconnect if the connection is lost or dead. Must be called under self._lock."""
         if self._client is None:
             await self.connect()
             return
         # Check if connection is still alive with a NOOP
         try:
-            await asyncio.to_thread(lambda: self._client.noop())
+            client = self._client
+            await asyncio.to_thread(lambda: client.noop())
         except Exception:
-            logger.debug("imap.connection_dead, reconnecting")
+            logger.debug("imap.connection_dead_reconnecting")
             self._client = None
             await self.connect()
 
@@ -110,10 +178,11 @@ class ImapMutator:
         self, message_id: str, folder: str | None = None
     ) -> tuple[str, int]:
         """Find the UID and folder for a message by Message-ID."""
-        await self._ensure_connected()
-        return await asyncio.to_thread(
-            self._find_uid_sync, message_id, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            return await asyncio.to_thread(
+                self._find_uid_sync, message_id, folder
+            )
 
     def _move_sync(
         self, message_id: str, to_folder: str, from_folder: str | None = None
@@ -140,15 +209,16 @@ class ImapMutator:
         from_folder: str | None = None,
     ) -> None:
         """Move a message by COPY + DELETE + EXPUNGE."""
-        await self._ensure_connected()
-        try:
-            await asyncio.to_thread(
-                self._move_sync, message_id, to_folder, from_folder
-            )
-        except ImapError:
-            raise
-        except Exception as e:
-            raise ImapError(str(e)) from e
+        async with self._lock:
+            await self._ensure_connected()
+            try:
+                await asyncio.to_thread(
+                    self._move_sync, message_id, to_folder, from_folder
+                )
+            except ImapError:
+                raise
+            except Exception as e:
+                raise ImapError(str(e)) from e
 
     async def delete(
         self, message_id: str, from_folder: str | None = None
@@ -193,31 +263,34 @@ class ImapMutator:
         self, message_id: str, flags: str, folder: str | None = None
     ) -> None:
         """Set flags on a message (replaces existing flags)."""
-        await self._ensure_connected()
-        flag_list = flags.split()
-        await asyncio.to_thread(
-            self._set_flags_sync, message_id, flag_list, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            flag_list = flags.split()
+            await asyncio.to_thread(
+                self._set_flags_sync, message_id, flag_list, folder
+            )
 
     async def add_flags(
         self, message_id: str, flags: str, folder: str | None = None
     ) -> None:
         """Add flags to a message."""
-        await self._ensure_connected()
-        flag_list = flags.split()
-        await asyncio.to_thread(
-            self._add_flags_sync, message_id, flag_list, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            flag_list = flags.split()
+            await asyncio.to_thread(
+                self._add_flags_sync, message_id, flag_list, folder
+            )
 
     async def remove_flags(
         self, message_id: str, flags: str, folder: str | None = None
     ) -> None:
         """Remove flags from a message."""
-        await self._ensure_connected()
-        flag_list = flags.split()
-        await asyncio.to_thread(
-            self._remove_flags_sync, message_id, flag_list, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            flag_list = flags.split()
+            await asyncio.to_thread(
+                self._remove_flags_sync, message_id, flag_list, folder
+            )
 
     # ── Body fetch (v4 body indexer) ──────────────────────────────────
 
@@ -235,22 +308,77 @@ class ImapMutator:
         await self._ensure_connected()
         return await asyncio.to_thread(self._fetch_body_sync, message_id, folder)
 
-    def _fetch_bodies_in_folder_sync(self, folder: str) -> dict[str, str]:
-        """Bulk-fetch all message bodies in a folder (sync).
+    def _fetch_body_and_structure_sync(
+        self, message_id: str, folder: str | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Fetch body text AND attachment metadata in one IMAP round-trip."""
+        assert self._client is not None
+        imap_folder, uid = self._find_uid_sync(message_id, folder)
+        self._client.select_folder(imap_folder, readonly=True)
+        response = self._client.fetch([uid], ["BODY[TEXT]", "BODYSTRUCTURE"])
+        data = response.get(uid, {})
 
-        Returns {message_id: body_text} for every message in the folder.
-        Used for initial indexing — one IMAP command per chunk of 200 messages.
+        raw = data.get(b"BODY[TEXT]", b"")
+        body = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+
+        bs = data.get(b"BODYSTRUCTURE")
+        attachments = _parse_bodystructure(bs) if bs else []
+
+        return body, attachments
+
+    async def fetch_body_and_structure(
+        self, message_id: str, folder: str | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Fetch body text and attachment metadata for a message."""
+        async with self._lock:
+            await self._ensure_connected()
+            return await asyncio.to_thread(self._fetch_body_and_structure_sync, message_id, folder)
+
+    def _fetch_attachment_sync(
+        self, message_id: str, part_num: str, folder: str | None = None
+    ) -> bytes:
+        """Fetch a specific MIME body part (attachment content) by part number."""
+        assert self._client is not None
+        imap_folder, uid = self._find_uid_sync(message_id, folder)
+        self._client.select_folder(imap_folder, readonly=True)
+        part_key = f"BODY[{part_num}]".encode()
+        response = self._client.fetch([uid], [f"BODY[{part_num}]"])
+        data = response.get(uid, {})
+        raw = data.get(part_key, b"")
+        if isinstance(raw, bytes):
+            # IMAP typically serves attachment parts as base64
+            try:
+                return base64.b64decode(raw)
+            except Exception:
+                return raw
+        return b""
+
+    async def fetch_attachment(
+        self, message_id: str, part_num: str, folder: str | None = None
+    ) -> bytes:
+        """Fetch raw attachment bytes for a given MIME part number."""
+        async with self._lock:
+            await self._ensure_connected()
+            return await asyncio.to_thread(self._fetch_attachment_sync, message_id, part_num, folder)
+
+    def _fetch_bodies_in_folder_sync(
+        self, folder: str
+    ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
+        """Bulk-fetch all message bodies + attachment metadata in a folder (sync).
+
+        Returns {message_id: (body_text, attachments)} for every message.
+        One IMAP command per chunk of 200 messages.
         """
         assert self._client is not None
         self._client.select_folder(folder, readonly=True)
         all_uids = self._client.search(["ALL"])
-        result: dict[str, str] = {}
+        result: dict[str, tuple[str, list[dict[str, Any]]]] = {}
 
         for i in range(0, len(all_uids), 200):
             chunk = all_uids[i : i + 200]
             response = self._client.fetch(
                 chunk,
-                ["BODY[HEADER.FIELDS (MESSAGE-ID)]", "BODY[TEXT]"],
+                ["BODY[HEADER.FIELDS (MESSAGE-ID)]", "BODY[TEXT]", "BODYSTRUCTURE"],
             )
             for uid, data in response.items():
                 raw_header = data.get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]", b"")
@@ -258,20 +386,36 @@ class ImapMutator:
                 mid = ""
                 for line in header_str.splitlines():
                     if line.lower().startswith("message-id:"):
-                        mid = line.split(":", 1)[1].strip()
+                        mid = line.split(":", 1)[1].strip().strip("<>")
                         break
                 if not mid:
                     continue
                 raw_body = data.get(b"BODY[TEXT]", b"")
                 body = raw_body.decode("utf-8", errors="replace") if isinstance(raw_body, bytes) else str(raw_body)
-                result[mid] = body
+                bs = data.get(b"BODYSTRUCTURE")
+                attachments = _parse_bodystructure(bs) if bs else []
+                result[mid] = (body, attachments)
 
         return result
 
-    async def fetch_bodies_in_folder(self, folder: str) -> dict[str, str]:
-        """Bulk-fetch all bodies in a folder. Returns {message_id: body}."""
-        await self._ensure_connected()
-        return await asyncio.to_thread(self._fetch_bodies_in_folder_sync, folder)
+    async def fetch_bodies_in_folder(
+        self, folder: str
+    ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
+        """Bulk-fetch all bodies + attachment metadata in a folder."""
+        async with self._lock:
+            for attempt in range(3):
+                await self._ensure_connected()
+                try:
+                    return await asyncio.to_thread(self._fetch_bodies_in_folder_sync, folder)
+                except Exception as e:
+                    logger.warning(
+                        "imap.fetch_bodies_retry",
+                        folder=folder,
+                        attempt=attempt + 1,
+                        error=str(e),
+                    )
+                    self._client = None  # force reconnect on next attempt
+            return {}
 
     # ── Batch operations ──────────────────────────────────────────────
 
@@ -356,10 +500,11 @@ class ImapMutator:
 
         Raises ImapError if any message is not found.
         """
-        await self._ensure_connected()
-        uids_by_folder, errors = await asyncio.to_thread(
-            self._batch_find_uids_sync, message_ids, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            uids_by_folder, errors = await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, folder
+            )
         if errors:
             raise ImapError(
                 f"Messages not found: {[e['message_id'] for e in errors]}"
@@ -370,10 +515,11 @@ class ImapMutator:
         self, message_ids: list[str], folder: str | None = None
     ) -> tuple[dict[str, list[tuple[str, int]]], list[dict]]:
         """Find UIDs for multiple messages, returning errors instead of raising."""
-        await self._ensure_connected()
-        return await asyncio.to_thread(
-            self._batch_find_uids_sync, message_ids, folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            return await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, folder
+            )
 
     def _batch_move_sync(
         self,
@@ -459,15 +605,16 @@ class ImapMutator:
         from_folder: str | None = None,
     ) -> tuple[int, list[dict]]:
         """Batch move messages by COPY + DELETE + EXPUNGE, grouped by folder."""
-        await self._ensure_connected()
-        uids_by_folder, find_errors = await asyncio.to_thread(
-            self._batch_find_uids_sync, message_ids, from_folder
-        )
-        if not uids_by_folder:
-            return 0, find_errors
-        succeeded, move_errors = await asyncio.to_thread(
-            self._batch_move_sync, uids_by_folder, to_folder
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            uids_by_folder, find_errors = await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, from_folder
+            )
+            if not uids_by_folder:
+                return 0, find_errors
+            succeeded, move_errors = await asyncio.to_thread(
+                self._batch_move_sync, uids_by_folder, to_folder
+            )
         return succeeded, find_errors + move_errors
 
     async def batch_archive(
@@ -493,16 +640,17 @@ class ImapMutator:
         folder: str | None = None,
     ) -> tuple[int, list[dict]]:
         """Batch add flags to messages."""
-        await self._ensure_connected()
-        flag_list = flags.split()
-        uids_by_folder, find_errors = await asyncio.to_thread(
-            self._batch_find_uids_sync, message_ids, folder
-        )
-        if not uids_by_folder:
-            return 0, find_errors
-        succeeded, flag_errors = await asyncio.to_thread(
-            self._batch_add_flags_sync, uids_by_folder, flag_list
-        )
+        async with self._lock:
+            await self._ensure_connected()
+            flag_list = flags.split()
+            uids_by_folder, find_errors = await asyncio.to_thread(
+                self._batch_find_uids_sync, message_ids, folder
+            )
+            if not uids_by_folder:
+                return 0, find_errors
+            succeeded, flag_errors = await asyncio.to_thread(
+                self._batch_add_flags_sync, uids_by_folder, flag_list
+            )
         return succeeded, find_errors + flag_errors
 
     # ── Pre-grouped batch operations (query-based) ────────────────────
@@ -528,24 +676,25 @@ class ImapMutator:
             to_folder=to_folder,
         )
 
-        await self._ensure_connected()
-        all_uids: dict[str, list[tuple[str, int]]] = {}
-        all_errors: list[dict] = []
+        async with self._lock:
+            await self._ensure_connected()
+            all_uids: dict[str, list[tuple[str, int]]] = {}
+            all_errors: list[dict] = []
 
-        for folder, message_ids in message_ids_by_folder.items():
-            uids_by_folder, errors = await asyncio.to_thread(
-                self._batch_find_uids_sync, message_ids, folder
+            for folder, message_ids in message_ids_by_folder.items():
+                uids_by_folder, errors = await asyncio.to_thread(
+                    self._batch_find_uids_sync, message_ids, folder
+                )
+                for f, entries in uids_by_folder.items():
+                    all_uids.setdefault(f, []).extend(entries)
+                all_errors.extend(errors)
+
+            if not all_uids:
+                return 0, all_errors
+
+            succeeded, move_errors = await asyncio.to_thread(
+                self._batch_move_sync, all_uids, to_folder
             )
-            for f, entries in uids_by_folder.items():
-                all_uids.setdefault(f, []).extend(entries)
-            all_errors.extend(errors)
-
-        if not all_uids:
-            return 0, all_errors
-
-        succeeded, move_errors = await asyncio.to_thread(
-            self._batch_move_sync, all_uids, to_folder
-        )
 
         logger.info(
             "imap.batch_move_by_folder.done",
@@ -576,24 +725,25 @@ class ImapMutator:
             flags=flags,
         )
 
-        await self._ensure_connected()
-        all_uids: dict[str, list[tuple[str, int]]] = {}
-        all_errors: list[dict] = []
+        async with self._lock:
+            await self._ensure_connected()
+            all_uids: dict[str, list[tuple[str, int]]] = {}
+            all_errors: list[dict] = []
 
-        for folder, message_ids in message_ids_by_folder.items():
-            uids_by_folder, errors = await asyncio.to_thread(
-                self._batch_find_uids_sync, message_ids, folder
+            for folder, message_ids in message_ids_by_folder.items():
+                uids_by_folder, errors = await asyncio.to_thread(
+                    self._batch_find_uids_sync, message_ids, folder
+                )
+                for f, entries in uids_by_folder.items():
+                    all_uids.setdefault(f, []).extend(entries)
+                all_errors.extend(errors)
+
+            if not all_uids:
+                return 0, all_errors
+
+            succeeded, flag_errors = await asyncio.to_thread(
+                self._batch_add_flags_sync, all_uids, flags
             )
-            for f, entries in uids_by_folder.items():
-                all_uids.setdefault(f, []).extend(entries)
-            all_errors.extend(errors)
-
-        if not all_uids:
-            return 0, all_errors
-
-        succeeded, flag_errors = await asyncio.to_thread(
-            self._batch_add_flags_sync, all_uids, flags
-        )
 
         logger.info(
             "imap.batch_add_flags_by_folder.done",

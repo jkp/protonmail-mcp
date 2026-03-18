@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 _API_BASE = "https://mail.proton.me/api"
 
-# System label IDs → folder names (in priority order for derive_folder)
+# System label IDs → IMAP folder names
+# Both "real" and "aggregate" sent/drafts labels map to the same IMAP folder in Bridge
+# 0=Inbox, 1=AllDrafts→Drafts, 2=AllSent→Sent, 3=Trash, 4=Spam, 6=Archive,
+# 7=Sent, 8=Drafts, 9=Outbox, 16=Snoozed
+# Excluded (virtual/no matching IMAP folder): 5=AllMail, 10=Starred, 12=AllScheduled, 15=AllMail(alt)
 _SYSTEM_LABELS: dict[str, str] = {
     "0": "INBOX",
     "1": "Drafts",
@@ -36,9 +40,11 @@ _SYSTEM_LABELS: dict[str, str] = {
     "3": "Trash",
     "4": "Spam",
     "6": "Archive",
-    "7": "Scheduled",
+    "7": "Sent",
+    "8": "Drafts",
+    "9": "Outbox",
+    "16": "Snoozed",
 }
-_ALL_MAIL_ID = "5"
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
@@ -61,23 +67,35 @@ class AuthError(Exception):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def derive_folder(label_ids: list[str]) -> str | None:
-    """Derive a human-readable folder name from a message's label ID list.
+def derive_folder(
+    label_ids: list[str],
+    label_map: dict[str, dict] | None = None,
+) -> str | None:
+    """Derive an IMAP folder name from a message's label ID list.
 
-    Prefers real system labels over "All Mail" (virtual). Returns None if
-    label_ids is empty.
+    Args:
+        label_ids: ProtonMail label IDs for the message.
+        label_map: Optional {label_id: {name, type}} from the labels API.
+                   Type=3 labels → Bridge IMAP "Labels/{name}"
+                   Type=4 labels are system labels already in _SYSTEM_LABELS.
+
+    Prefers real system folders. Falls back to user labels (Type=3).
+    Returns None if unresolvable (e.g., only virtual aggregate labels).
     """
     if not label_ids:
         return None
 
-    # Check system labels in priority order, skipping All Mail
+    # Check real system folders first (Type=4, non-virtual)
     for label_id, name in _SYSTEM_LABELS.items():
         if label_id in label_ids:
             return name
 
-    # All Mail only
-    if _ALL_MAIL_ID in label_ids:
-        return "All Mail"
+    # User-created labels (Type=3) → Bridge exposes as "Labels/{name}"
+    if label_map:
+        for label_id in label_ids:
+            info = label_map.get(label_id)
+            if info and info.get("type") == 3:
+                return f"Labels/{info['name']}"
 
     return None
 
@@ -189,11 +207,11 @@ class ProtonClient:
     # ── Event loop ────────────────────────────────────────────────────────────
 
     async def get_latest_event_id(self) -> str:
-        data = await self._request("GET", "/mail/v4/events/latest")
+        data = await self._request("GET", "/core/v4/events/latest")
         return data["EventID"]
 
     async def get_events(self, event_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/mail/v4/events/{event_id}")
+        return await self._request("GET", f"/core/v4/events/{event_id}")
 
     # ── Message metadata ──────────────────────────────────────────────────────
 
@@ -210,8 +228,11 @@ class ProtonClient:
     # ── Labels ────────────────────────────────────────────────────────────────
 
     async def get_labels(self) -> list[dict[str, Any]]:
-        data = await self._request("GET", "/mail/v4/labels")
-        return data["Labels"]
+        # Type=3 = user-created labels (Bridge: "Labels/{name}")
+        # Type=4 = system folders (INBOX, Sent, Trash, etc.)
+        user_labels = await self._request("GET", "/core/v4/labels", params={"Type": 3})
+        system = await self._request("GET", "/core/v4/labels", params={"Type": 4})
+        return user_labels["Labels"] + system["Labels"]
 
     # ── Mutations ─────────────────────────────────────────────────────────────
 

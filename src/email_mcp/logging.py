@@ -2,22 +2,40 @@
 
 import logging
 import sys
+from pathlib import Path
 
 import structlog
 
 
 def configure_logging(
-    level: str = "INFO", ntfy_url: str = "", ntfy_topic: str = ""
+    level: str = "INFO", ntfy_url: str = "", ntfy_topic: str = "",
+    log_file: Path | None = None,
 ) -> None:
-    """Configure structlog with JSON rendering for production use."""
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    """Configure structlog with JSON rendering.
 
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stderr,
-        level=numeric_level,
-        force=True,
-    )
+    When running interactively (TTY), routes JSON logs to a file so rich
+    progress bars are not polluted. When running non-interactively (MCP stdio),
+    logs go to stderr as normal.
+    """
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    interactive = sys.stderr.isatty()
+
+    if interactive and log_file is not None:
+        # Route all logs to file, leave stderr clean for rich progress bars
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            format="%(message)s",
+            filename=str(log_file),
+            level=numeric_level,
+            force=True,
+        )
+    else:
+        logging.basicConfig(
+            format="%(message)s",
+            stream=sys.stderr,
+            level=numeric_level,
+            force=True,
+        )
 
     processors: list = [
         structlog.stdlib.filter_by_level,

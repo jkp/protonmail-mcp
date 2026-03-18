@@ -8,9 +8,13 @@ from typing import Any
 import structlog
 from fastmcp.utilities.types import Image
 
+from email_mcp.imap import ImapMutator
 from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
+
+# Module-level ref — set during server lifespan
+_imap: ImapMutator | None = None
 
 _TEXT_EXTENSIONS = {
     ".txt", ".csv", ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml", ".log",
@@ -20,6 +24,14 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 def _format_date(unix_ts: int) -> str:
     return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _resolve_message(message_id: str):
+    """Look up a message row by RFC 2822 Message-ID or pm_id."""
+    return db.execute(
+        "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
+        [message_id, message_id],
+    ).fetchone()
 
 
 @mcp.tool(
@@ -34,12 +46,7 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
     """
     logger.info("tool.read_email", message_id=message_id)
 
-    # Look up by RFC 2822 Message-ID first, fall back to pm_id
-    row = db.execute(
-        "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
-        [message_id, message_id],
-    ).fetchone()
-
+    row = _resolve_message(message_id)
     if row is None:
         return {
             "error": "not_found",
@@ -49,7 +56,6 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
 
     from email_mcp.db import _row_to_message
     msg = _row_to_message(row)
-
     body = db.bodies.get(msg.pm_id) or ""
 
     logger.info(
@@ -79,10 +85,7 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
     annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Attachments"}
 )
 async def list_attachments(message_id: str, folder: str | None = None) -> list[dict[str, Any]]:
-    """List attachments on an email without downloading them.
-
-    Note: Attachment metadata is not yet available in v4. This will be populated
-    once the attachment indexing phase is complete.
+    """List attachments on an email.
 
     Args:
         message_id: The Message-ID header value
@@ -90,16 +93,26 @@ async def list_attachments(message_id: str, folder: str | None = None) -> list[d
     """
     logger.info("tool.list_attachments", message_id=message_id)
 
-    row = db.execute(
-        "SELECT has_attachments FROM messages WHERE message_id = ? OR pm_id = ?",
-        [message_id, message_id],
-    ).fetchone()
-
-    if row is None or not row[0]:
+    row = _resolve_message(message_id)
+    if row is None:
         return []
 
-    # Attachment detail metadata not yet in SQLite — return placeholder
-    return [{"note": "Attachment metadata will be available in a future sync"}]
+    from email_mcp.db import _row_to_message
+    msg = _row_to_message(row)
+
+    if not msg.has_attachments:
+        return []
+
+    attachments = db.attachments.list_for_message(msg.pm_id)
+
+    if not attachments and not msg.body_indexed:
+        return [{"note": "Attachment metadata not yet indexed. Body indexing is still in progress."}]
+
+    logger.info("tool.list_attachments.done", count=len(attachments))
+    return [
+        {"filename": a["filename"], "size": a["size"], "mime_type": a["mime_type"]}
+        for a in attachments
+    ]
 
 
 @mcp.tool(
@@ -112,12 +125,82 @@ async def download_attachment(
 ) -> list[str | Image]:
     """Download and return an email attachment.
 
-    Note: Attachment download is not yet implemented in v4.
+    Content is processed server-side:
+    - PDFs: extracted to markdown text
+    - Images: returned as viewable images
+    - Text files: returned as text
+    - Other formats: returned as base64-encoded data
 
     Args:
         message_id: The Message-ID header value
         filename: The attachment filename to download
-        folder: Optional folder hint
+        folder: Optional folder hint (unused)
     """
     logger.info("tool.download_attachment", message_id=message_id, filename=filename)
-    return ["Attachment download is not yet implemented in v4 architecture."]
+
+    row = _resolve_message(message_id)
+    if row is None:
+        return [f"Message not found: {message_id}"]
+
+    from email_mcp.db import _row_to_message
+    msg = _row_to_message(row)
+
+    att = db.attachments.get(msg.pm_id, filename)
+    if att is None:
+        return [f"Attachment '{filename}' not found. Run list_attachments first to confirm the filename."]
+
+    if _imap is None:
+        return ["IMAP not connected — attachment download unavailable."]
+
+    try:
+        content = await _imap.fetch_attachment(
+            msg.message_id, att["part_num"], folder=msg.folder
+        )
+    except Exception as e:
+        return [f"Failed to fetch attachment: {e}"]
+
+    size = len(content)
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    output: list[str | Image]
+
+    if suffix == ".pdf":
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(content)
+            tmp_path = Path(f.name)
+        try:
+            import pymupdf
+            doc = pymupdf.open(str(tmp_path))
+            pages = [f"## Page {i+1}\n\n{page.get_text('text').strip()}"
+                     for i, page in enumerate(doc) if page.get_text("text").strip()]
+            doc.close()
+            output = [f"# {filename} ({size} bytes)\n\n" + "\n\n".join(pages)]
+        except ImportError:
+            output = [f"# {filename} ({size} bytes)\n\n(pymupdf not installed — cannot extract PDF text)"]
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    elif suffix in _IMAGE_EXTENSIONS:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(content)
+            tmp_path = Path(f.name)
+        output = [f"Image: {filename} ({size} bytes)", Image(path=tmp_path)]
+
+    elif suffix in _TEXT_EXTENSIONS:
+        output = [f"# {filename} ({size} bytes)\n\n{content.decode(errors='replace')}"]
+
+    else:
+        encoded = base64.b64encode(content).decode()
+        mime_type = att["mime_type"] or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        output = [
+            f"Binary file: {filename} ({size} bytes, {mime_type})\n"
+            f"Base64-encoded content:\n{encoded}"
+        ]
+
+    logger.info("tool.download_attachment.done", filename=filename, size=size)
+    return output

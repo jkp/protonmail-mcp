@@ -17,10 +17,14 @@ dependencies = [
     "pymupdf>=1.27.2",
     "imapclient>=3.1.0",
     "httpx>=0.28.1",
+    "proton-client>=0.5.1",
+    "msgpack>=1.1.2",
+    "pgpy13>=0.6.1rc1",
 ]
 
 [project.scripts]
 email-mcp = "email_mcp.server:main"
+email-mcp-auth = "email_mcp.auth:main"
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]

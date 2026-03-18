@@ -30,10 +30,29 @@ class InitialSync:
         db: Database,
         api: ProtonClient,
         body_indexer: Any,
+        progress: Any = None,
     ) -> None:
         self._db = db
         self._api = api
         self._body_indexer = body_indexer
+        self._progress = progress
+
+    async def sync_labels(self) -> dict[str, dict]:
+        """Sync labels from API. Always runs at startup (fast, idempotent).
+
+        Returns {label_id: {name, type}} for use in folder derivation.
+        """
+        labels = await self._api.get_labels()
+        for label in labels:
+            self._db.labels.upsert(
+                id=label["ID"],
+                name=label["Name"],
+                type=label.get("Type", 1),
+                color=label.get("Color"),
+                order=label.get("Order"),
+            )
+        logger.info("initial_sync.labels_done", count=len(labels))
+        return {l["ID"]: {"name": l["Name"], "type": l.get("Type", 1)} for l in labels}
 
     async def run(self) -> None:
         """Run the initial sync. No-op if already completed."""
@@ -48,17 +67,8 @@ class InitialSync:
         self._db.sync_state.set("last_event_id", event_id)
         logger.info("initial_sync.event_id_anchored", event_id=event_id)
 
-        # Sync labels
-        labels = await self._api.get_labels()
-        for label in labels:
-            self._db.labels.upsert(
-                id=label["ID"],
-                name=label["Name"],
-                type=label.get("Type", 1),
-                color=label.get("Color"),
-                order=label.get("Order"),
-            )
-        logger.info("initial_sync.labels_done", count=len(labels))
+        # Sync labels and build label map for folder derivation
+        label_map = await self.sync_labels()
 
         # Fetch all message metadata, paginated
         folders_seen: set[str] = set()
@@ -72,25 +82,35 @@ class InitialSync:
             if not messages:
                 break
 
+            if self._progress and synced == 0:
+                self._progress.set_metadata_total(total)
+
             for msg in messages:
                 pm_id = msg["ID"]
                 label_ids = msg.get("LabelIDs", [])
-                folder = derive_folder(label_ids)
+                folder = derive_folder(label_ids, label_map)
                 row = _event_to_row(pm_id, msg, folder)
                 self._db.messages.upsert(row)
                 if folder:
                     folders_seen.add(folder)
 
             synced += len(messages)
-            logger.info("initial_sync.messages_progress", synced=synced, total=total)
+            if self._progress:
+                self._progress.advance_metadata(len(messages))
+            else:
+                logger.info("initial_sync.messages_progress", synced=synced, total=total)
 
             if synced >= total:
                 break
             page += 1
 
+        if self._progress:
+            self._progress.metadata_done()
         logger.info("initial_sync.metadata_done", synced=synced)
 
         # Kick off body indexing per folder (background, best-effort)
+        if self._progress:
+            self._progress.set_bodies_total(synced)
         for folder in folders_seen:
             await self._body_indexer.index_folder(folder)
 

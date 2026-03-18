@@ -25,10 +25,11 @@ logger = structlog.get_logger(__name__)
 class BodyIndexer:
     """Fetches and indexes message bodies from Bridge IMAP into SQLite FTS5."""
 
-    def __init__(self, db: Database, imap: Any, workers: int = 3) -> None:
+    def __init__(self, db: Database, imap: Any, workers: int = 3, progress: Any = None) -> None:
         self._db = db
         self._imap = imap
         self._workers = workers
+        self._progress = progress
 
     # ── Single message ────────────────────────────────────────────────────────
 
@@ -43,13 +44,26 @@ class BodyIndexer:
             logger.warning("body_indexer.no_message_id", pm_id=pm_id)
             return
 
-        try:
-            body = await self._imap.fetch_body(row.message_id, folder=row.folder)
-            self._db.bodies.insert(pm_id, body)
-            self._db.messages.mark_body_indexed(pm_id)
-            logger.debug("body_indexer.indexed", pm_id=pm_id)
-        except Exception as e:
-            logger.warning("body_indexer.fetch_failed", pm_id=pm_id, error=str(e))
+        delays = [5, 15, 60]  # seconds between retries
+        for attempt, delay in enumerate(delays + [None]):
+            try:
+                body, attachments = await self._imap.fetch_body_and_structure(
+                    row.message_id, folder=row.folder
+                )
+                self._db.bodies.insert(pm_id, body)
+                if attachments:
+                    self._db.attachments.upsert_for_message(pm_id, attachments)
+                self._db.messages.mark_body_indexed(pm_id)
+                if self._progress:
+                    self._progress.advance_bodies()
+                logger.debug("body_indexer.indexed", pm_id=pm_id, attachments=len(attachments))
+                return
+            except Exception as e:
+                if delay is None:
+                    logger.warning("body_indexer.fetch_failed", pm_id=pm_id, error=str(e), attempts=attempt + 1)
+                else:
+                    logger.debug("body_indexer.fetch_retry", pm_id=pm_id, attempt=attempt + 1, retry_in=delay)
+                    await asyncio.sleep(delay)
 
     # ── Queue worker ──────────────────────────────────────────────────────────
 
@@ -85,28 +99,23 @@ class BodyIndexer:
             logger.info("body_indexer.index_folder.empty", folder=folder)
             return
 
-        # Build a reverse index: message_id → pm_id
-        mid_to_pmid: dict[str, str] = {}
-        rows = self._db.execute(
-            "SELECT pm_id, message_id FROM messages WHERE message_id IS NOT NULL"
-        ).fetchall()
-        for row in rows:
-            mid_to_pmid[row[0]] = row[1]  # message_id → pm_id... wait, reversed
-
-        # message_id → pm_id
-        mid_to_pmid = {}
+        # message_id → [pm_id, ...] (duplicates share the same body)
+        mid_to_pmids: dict[str, list[str]] = {}
         for row in self._db.execute(
             "SELECT pm_id, message_id FROM messages WHERE message_id IS NOT NULL"
         ).fetchall():
-            mid_to_pmid[row[1]] = row[0]  # message_id → pm_id
+            mid_to_pmids.setdefault(row[1], []).append(row[0])
 
         indexed = 0
-        for message_id, body in bodies.items():
-            pm_id = mid_to_pmid.get(message_id)
-            if not pm_id:
+        for message_id, (body, attachments) in bodies.items():
+            pm_ids = mid_to_pmids.get(message_id)
+            if not pm_ids:
                 continue
-            self._db.bodies.insert(pm_id, body)
-            self._db.messages.mark_body_indexed(pm_id)
-            indexed += 1
+            for pm_id in pm_ids:
+                self._db.bodies.insert(pm_id, body)
+                if attachments:
+                    self._db.attachments.upsert_for_message(pm_id, attachments)
+                self._db.messages.mark_body_indexed(pm_id)
+                indexed += 1
 
-        logger.info("body_indexer.index_folder.done", folder=folder, indexed=indexed, fetched=len(bodies))
+        logger.info("body_indexer.index_folder.done", folder=folder, indexed=indexed, fetched=len(bodies), duplicates=indexed - len(bodies) if indexed > len(bodies) else 0)

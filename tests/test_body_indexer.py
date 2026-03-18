@@ -37,10 +37,10 @@ def _insert_message(db: Database, pm_id: str, message_id: str, body_indexed: boo
 @pytest.fixture
 def mock_imap() -> MagicMock:
     imap = MagicMock()
-    imap.fetch_body = AsyncMock(return_value="Hello, this is the email body.")
+    imap.fetch_body_and_structure = AsyncMock(return_value=("Hello, this is the email body.", []))
     imap.fetch_bodies_in_folder = AsyncMock(return_value={
-        "<msg1@example.com>": "Body of message 1",
-        "<msg2@example.com>": "Body of message 2",
+        "<msg1@example.com>": ("Body of message 1", []),
+        "<msg2@example.com>": ("Body of message 2", []),
     })
     return imap
 
@@ -71,7 +71,7 @@ class TestSingleFetch:
     ) -> None:
         _insert_message(db, "pm-001", "<msg1@example.com>", body_indexed=True)
         await indexer._fetch_and_index("pm-001")
-        mock_imap.fetch_body.assert_not_called()
+        mock_imap.fetch_body_and_structure.assert_not_called()
 
     async def test_handles_missing_message_id(
         self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
@@ -84,13 +84,13 @@ class TestSingleFetch:
             folder="INBOX", size=0, has_attachments=False, body_indexed=False,
         ))
         await indexer._fetch_and_index("pm-001")
-        mock_imap.fetch_body.assert_not_called()
+        mock_imap.fetch_body_and_structure.assert_not_called()
 
     async def test_handles_imap_fetch_error(
         self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
     ) -> None:
         _insert_message(db, "pm-001", "<msg1@example.com>")
-        mock_imap.fetch_body.side_effect = Exception("IMAP error")
+        mock_imap.fetch_body_and_structure.side_effect = Exception("IMAP error")
         await indexer._fetch_and_index("pm-001")  # should not raise
         assert db.messages.get("pm-001").body_indexed is False
 
@@ -98,7 +98,7 @@ class TestSingleFetch:
         self, indexer: BodyIndexer, db: Database, mock_imap: MagicMock
     ) -> None:
         await indexer._fetch_and_index("does-not-exist")
-        mock_imap.fetch_body.assert_not_called()
+        mock_imap.fetch_body_and_structure.assert_not_called()
 
 
 class TestQueueProcessing:
@@ -160,6 +160,6 @@ class TestBulkFolderIndex:
     ) -> None:
         """Bodies returned by IMAP that don't match any pm_id are ignored."""
         mock_imap.fetch_bodies_in_folder.return_value = {
-            "<unknown@example.com>": "orphan body",
+            "<unknown@example.com>": ("orphan body", []),
         }
         await indexer.index_folder("INBOX")  # no messages in db — should not raise

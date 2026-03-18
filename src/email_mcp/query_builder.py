@@ -11,6 +11,7 @@ Supported operators:
     in:sent             folder = 'Sent'
     in:spam             folder = 'Spam'
     has:attachment(s)   has_attachments = 1
+    filename:report     subquery on attachments table
     older_than:30d      date < unixepoch() - N  (h/d/w/m/y units)
     newer_than:7d       date > unixepoch() - N
     *                   match all (no constraint)
@@ -145,6 +146,13 @@ def _apply_operator(result: ParsedQuery, op: str, val: str) -> None:
     elif op == "has":
         if val.lower().startswith("attachment"):
             result.where_clauses.append("has_attachments = 1")
+
+    elif op == "filename":
+        # Subquery: message must have an attachment with matching filename
+        result.where_clauses.append(
+            "pm_id IN (SELECT pm_id FROM attachments WHERE filename LIKE ?)"
+        )
+        result.params.append(f"%{val}%")
 
     elif op in ("older_than", "newer_than"):
         seconds = _parse_duration(val)
