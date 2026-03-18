@@ -31,7 +31,9 @@ class BodyIndexer:
 
     retry_delays: list[int] = [5, 15, 60]  # seconds between retries
 
-    def __init__(self, db: Database, decryptor: ProtonDecryptor, workers: int = 3, progress: Any = None) -> None:
+    def __init__(
+        self, db: Database, decryptor: ProtonDecryptor, workers: int = 3, progress: Any = None
+    ) -> None:
         self._db = db
         self._decryptor = decryptor
         self._workers = workers
@@ -69,8 +71,7 @@ class BodyIndexer:
                     )
                     # Mark as permanently failed (-1) so we don't retry forever
                     self._db.execute(
-                        "UPDATE messages SET body_indexed = -1"
-                        " WHERE pm_id = ?",
+                        "UPDATE messages SET body_indexed = -1 WHERE pm_id = ?",
                         [pm_id],
                     )
                     self._db.commit()
@@ -114,18 +115,14 @@ class BodyIndexer:
                     None = messages with NULL folder. _ALL (default) = everything.
         """
         if folder is self._ALL:
-            rows = self._db.execute(
-                "SELECT pm_id FROM messages WHERE body_indexed = 0"
-            ).fetchall()
+            rows = self._db.execute("SELECT pm_id FROM messages WHERE body_indexed = 0").fetchall()
         elif folder is None:
             rows = self._db.execute(
-                "SELECT pm_id FROM messages"
-                " WHERE body_indexed = 0 AND folder IS NULL"
+                "SELECT pm_id FROM messages WHERE body_indexed = 0 AND folder IS NULL"
             ).fetchall()
         else:
             rows = self._db.execute(
-                "SELECT pm_id FROM messages"
-                " WHERE body_indexed = 0 AND folder = ?",
+                "SELECT pm_id FROM messages WHERE body_indexed = 0 AND folder = ?",
                 [folder],
             ).fetchall()
 
@@ -152,7 +149,22 @@ class BodyIndexer:
                 if self._progress:
                     self._progress.advance_bodies()
 
-            batch_failed = len(batch) - len(results)
-            failed += batch_failed
+            # Mark failures as -1 so they aren't retried forever
+            failed_ids = set(batch) - set(results.keys())
+            for pm_id in failed_ids:
+                self._db.execute(
+                    "UPDATE messages SET body_indexed = -1"
+                    " WHERE pm_id = ?",
+                    [pm_id],
+                )
+            if failed_ids:
+                self._db.commit()
+            failed += len(failed_ids)
 
-        logger.info("body_indexer.index_unindexed.done", folder=folder, indexed=indexed, failed=failed, total=len(pm_ids))
+        logger.info(
+            "body_indexer.index_unindexed.done",
+            folder=folder,
+            indexed=indexed,
+            failed=failed,
+            total=len(pm_ids),
+        )
