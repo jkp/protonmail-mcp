@@ -16,70 +16,6 @@ from imapclient import IMAPClient
 logger = structlog.get_logger()
 
 
-def _parse_bodystructure(bs: Any, prefix: str = "") -> list[dict[str, Any]]:
-    """Recursively parse IMAP BODYSTRUCTURE, returning attachment metadata.
-
-    Each returned dict has: filename, size, mime_type, part_num.
-    Text parts (text/plain, text/html) are skipped.
-    """
-    if not bs or not isinstance(bs, (list, tuple)):
-        return []
-
-    attachments: list[dict[str, Any]] = []
-
-    # Multipart: first element is itself a list/tuple
-    if isinstance(bs[0], (list, tuple)):
-        part_idx = 1
-        for item in bs:
-            if isinstance(item, (list, tuple)):
-                num = f"{prefix}.{part_idx}" if prefix else str(part_idx)
-                attachments.extend(_parse_bodystructure(item, num))
-                part_idx += 1
-        return attachments
-
-    # Single part: (type, subtype, params, id, desc, encoding, size, ...)
-    if len(bs) < 7:
-        return []
-
-    def _decode(v: Any) -> str:
-        if isinstance(v, bytes):
-            return v.decode("utf-8", errors="replace")
-        return str(v) if v else ""
-
-    mime_type = f"{_decode(bs[0])}/{_decode(bs[1])}".lower()
-
-    # Skip inline text parts
-    if mime_type in ("text/plain", "text/html"):
-        return []
-
-    # Extract filename from content-type params (index 2)
-    filename: str | None = None
-    params = bs[2]
-    if isinstance(params, (list, tuple)):
-        for i in range(0, len(params) - 1, 2):
-            if isinstance(params[i], bytes) and params[i].lower() == b"name":
-                filename = _decode(params[i + 1])
-                break
-
-    # Also check content-disposition params (index 8 in extended BODYSTRUCTURE)
-    if not filename and len(bs) > 9 and isinstance(bs[9], (list, tuple)):
-        disp = bs[9]
-        if len(disp) > 1 and isinstance(disp[1], (list, tuple)):
-            dparams = disp[1]
-            for i in range(0, len(dparams) - 1, 2):
-                if isinstance(dparams[i], bytes) and dparams[i].lower() == b"filename":
-                    filename = _decode(dparams[i + 1])
-                    break
-
-    if not filename:
-        return []
-
-    size = bs[6] if isinstance(bs[6], int) else 0
-    part_num = prefix or "1"
-
-    return [{"filename": filename, "size": size, "mime_type": mime_type, "part_num": part_num}]
-
-
 class ImapError(Exception):
     """Error during IMAP operations."""
 
@@ -292,47 +228,7 @@ class ImapMutator:
                 self._remove_flags_sync, message_id, flag_list, folder
             )
 
-    # ── Body fetch (v4 body indexer) ──────────────────────────────────
-
-    def _fetch_body_sync(self, message_id: str, folder: str | None = None) -> str:
-        """Fetch decrypted body text for a single message (sync)."""
-        assert self._client is not None
-        imap_folder, uid = self._find_uid_sync(message_id, folder)
-        self._client.select_folder(imap_folder, readonly=True)
-        response = self._client.fetch([uid], ["BODY[TEXT]"])
-        raw = response.get(uid, {}).get(b"BODY[TEXT]", b"")
-        return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-
-    async def fetch_body(self, message_id: str, folder: str | None = None) -> str:
-        """Fetch decrypted body for a message by RFC 2822 Message-ID."""
-        await self._ensure_connected()
-        return await asyncio.to_thread(self._fetch_body_sync, message_id, folder)
-
-    def _fetch_body_and_structure_sync(
-        self, message_id: str, folder: str | None = None
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Fetch body text AND attachment metadata in one IMAP round-trip."""
-        assert self._client is not None
-        imap_folder, uid = self._find_uid_sync(message_id, folder)
-        self._client.select_folder(imap_folder, readonly=True)
-        response = self._client.fetch([uid], ["BODY[TEXT]", "BODYSTRUCTURE"])
-        data = response.get(uid, {})
-
-        raw = data.get(b"BODY[TEXT]", b"")
-        body = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-
-        bs = data.get(b"BODYSTRUCTURE")
-        attachments = _parse_bodystructure(bs) if bs else []
-
-        return body, attachments
-
-    async def fetch_body_and_structure(
-        self, message_id: str, folder: str | None = None
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Fetch body text and attachment metadata for a message."""
-        async with self._lock:
-            await self._ensure_connected()
-            return await asyncio.to_thread(self._fetch_body_and_structure_sync, message_id, folder)
+    # ── Attachment fetch (still via IMAP) ────────────────────────────
 
     def _fetch_attachment_sync(
         self, message_id: str, part_num: str, folder: str | None = None
@@ -360,62 +256,6 @@ class ImapMutator:
         async with self._lock:
             await self._ensure_connected()
             return await asyncio.to_thread(self._fetch_attachment_sync, message_id, part_num, folder)
-
-    def _fetch_bodies_in_folder_sync(
-        self, folder: str
-    ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
-        """Bulk-fetch all message bodies + attachment metadata in a folder (sync).
-
-        Returns {message_id: (body_text, attachments)} for every message.
-        One IMAP command per chunk of 200 messages.
-        """
-        assert self._client is not None
-        self._client.select_folder(folder, readonly=True)
-        all_uids = self._client.search(["ALL"])
-        result: dict[str, tuple[str, list[dict[str, Any]]]] = {}
-
-        for i in range(0, len(all_uids), 200):
-            chunk = all_uids[i : i + 200]
-            response = self._client.fetch(
-                chunk,
-                ["BODY[HEADER.FIELDS (MESSAGE-ID)]", "BODY[TEXT]", "BODYSTRUCTURE"],
-            )
-            for uid, data in response.items():
-                raw_header = data.get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]", b"")
-                header_str = raw_header.decode("utf-8", errors="replace") if isinstance(raw_header, bytes) else str(raw_header)
-                mid = ""
-                for line in header_str.splitlines():
-                    if line.lower().startswith("message-id:"):
-                        mid = line.split(":", 1)[1].strip().strip("<>")
-                        break
-                if not mid:
-                    continue
-                raw_body = data.get(b"BODY[TEXT]", b"")
-                body = raw_body.decode("utf-8", errors="replace") if isinstance(raw_body, bytes) else str(raw_body)
-                bs = data.get(b"BODYSTRUCTURE")
-                attachments = _parse_bodystructure(bs) if bs else []
-                result[mid] = (body, attachments)
-
-        return result
-
-    async def fetch_bodies_in_folder(
-        self, folder: str
-    ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
-        """Bulk-fetch all bodies + attachment metadata in a folder."""
-        async with self._lock:
-            for attempt in range(3):
-                await self._ensure_connected()
-                try:
-                    return await asyncio.to_thread(self._fetch_bodies_in_folder_sync, folder)
-                except Exception as e:
-                    logger.warning(
-                        "imap.fetch_bodies_retry",
-                        folder=folder,
-                        attempt=attempt + 1,
-                        error=str(e),
-                    )
-                    self._client = None  # force reconnect on next attempt
-            return {}
 
     # ── Batch operations ──────────────────────────────────────────────
 
