@@ -27,8 +27,7 @@ def configure_logging(
         handler.setFormatter(logging.Formatter("%(message)s"))
         logging.root.handlers = [handler]
         logging.root.setLevel(numeric_level)
-        # Also suppress httpx request logging in interactive mode
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+        # httpx request logs go to the file (useful for debugging API calls)
     else:
         logging.basicConfig(
             format="%(message)s",
