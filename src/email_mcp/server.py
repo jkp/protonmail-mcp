@@ -318,7 +318,12 @@ def main() -> None:
     )
     try:
         if settings.transport == "http":
-            mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)
+            mcp.run(
+                transport="http",
+                host=settings.host,
+                port=settings.port,
+                stateless_http=True,
+            )
         else:
             mcp.run(log_level="WARNING")
     except (KeyboardInterrupt, SystemExit):
