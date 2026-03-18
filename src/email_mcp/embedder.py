@@ -20,7 +20,7 @@ from email_mcp.db import Database
 logger = structlog.get_logger(__name__)
 
 _BATCH_SIZE = 64
-_MAX_BODY_CHARS = 1000  # ~500 tokens, fits within 512-token model limit
+_MAX_BODY_CHARS = 600  # Conservative: ~300 tokens, safely under 512-token model limit
 
 
 def _serialize_f32(vector: np.ndarray) -> bytes:
@@ -85,7 +85,9 @@ class Embedder:
             json={"model": self._model_name, "input": texts},
             timeout=60,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            detail = resp.json().get("error", {}).get("message", resp.text[:200])
+            raise RuntimeError(f"Together API: {detail}")
         data = resp.json()
         return np.array(
             [d["embedding"] for d in data["data"]], dtype=np.float32
