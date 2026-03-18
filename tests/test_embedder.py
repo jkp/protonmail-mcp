@@ -53,10 +53,12 @@ def mock_model():
 
     def _encode(texts, batch_size=64, show_progress_bar=True):
         # Return distinct vectors based on text content hash
+        from email_mcp.embedder import _EMBEDDING_DIMS
+
         vecs = []
         for t in texts:
             rng = np.random.RandomState(hash(t) % 2**31)
-            vecs.append(rng.randn(384).astype(np.float32))
+            vecs.append(rng.randn(_EMBEDDING_DIMS).astype(np.float32))
         return np.array(vecs)
 
     model.encode = _encode

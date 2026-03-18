@@ -27,6 +27,12 @@ def _serialize_f32(vector: np.ndarray) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
 
 
+_DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+_EMBEDDING_DIMS = 768
+_QUERY_PREFIX = "search_query: "
+_DOC_PREFIX = "search_document: "
+
+
 class Embedder:
     """Embed email content and search by vector similarity."""
 
@@ -34,7 +40,7 @@ class Embedder:
         self,
         db: Database,
         model: Any = None,
-        model_name: str = "all-MiniLM-L6-v2",
+        model_name: str = _DEFAULT_MODEL,
     ) -> None:
         self._db = db
         self._ensure_table()
@@ -50,7 +56,7 @@ class Embedder:
 
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(model_name)
+            self._model = SentenceTransformer(model_name, trust_remote_code=True)
             self._model.encode(["warmup"], show_progress_bar=False)
 
     def _ensure_table(self) -> None:
@@ -63,7 +69,7 @@ class Embedder:
 
         self._db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS message_vectors"
-            " USING vec0(pm_id TEXT PRIMARY KEY, embedding float[384])"
+            f" USING vec0(pm_id TEXT PRIMARY KEY, embedding float[{_EMBEDDING_DIMS}])"
         )
         # Add embedded column if missing
         existing = {row[1] for row in self._db.execute("PRAGMA table_info(messages)").fetchall()}
@@ -85,6 +91,7 @@ class Embedder:
                 continue
 
             text = (
+                f"{_DOC_PREFIX}"
                 f"From: {msg.sender_name or ''}"
                 f" <{msg.sender_email or ''}>\n"
                 f"Subject: {msg.subject or ''}\n\n"
@@ -115,7 +122,9 @@ class Embedder:
 
     def search(self, query: str, limit: int = 20) -> list[str]:
         """Semantic search. Returns pm_ids ranked by similarity."""
-        vec = self._model.encode([query], batch_size=1, show_progress_bar=False)
+        vec = self._model.encode(
+            [f"{_QUERY_PREFIX}{query}"], batch_size=1, show_progress_bar=False
+        )
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         rows = self._db.execute(
@@ -144,7 +153,9 @@ class Embedder:
         """
         # sqlite-vec requires k=? on the vec0 table directly.
         # Do vector search first (over-fetch), then post-filter with SQL.
-        vec = self._model.encode([query], batch_size=1, show_progress_bar=False)
+        vec = self._model.encode(
+            [f"{_QUERY_PREFIX}{query}"], batch_size=1, show_progress_bar=False
+        )
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         # Over-fetch to account for filtering
