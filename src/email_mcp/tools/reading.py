@@ -2,7 +2,7 @@
 
 import base64
 import mimetypes
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -17,13 +17,22 @@ logger = structlog.get_logger()
 _decryptor: ProtonDecryptor | None = None
 
 _TEXT_EXTENSIONS = {
-    ".txt", ".csv", ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml", ".log",
+    ".txt",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".htm",
+    ".md",
+    ".yaml",
+    ".yml",
+    ".log",
 }
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 def _format_date(unix_ts: int) -> str:
-    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.fromtimestamp(unix_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _resolve_message(message_id: str):
@@ -34,9 +43,7 @@ def _resolve_message(message_id: str):
     ).fetchone()
 
 
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Read Email"}
-)
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Read Email"})
 async def read_email(message_id: str, folder: str | None = None) -> dict[str, Any]:
     """Read a full email message by Message-ID.
 
@@ -54,9 +61,15 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
             "detail": "Message not found in local database. May not have been synced yet.",
         }
 
+    from email_mcp.convert import html_to_markdown
     from email_mcp.db import _row_to_message
+
     msg = _row_to_message(row)
     body = db.bodies.get(msg.pm_id) or ""
+
+    # Convert HTML to markdown for efficient LLM consumption
+    if body.strip().startswith(("<", "<!")):
+        body = html_to_markdown(body)
 
     logger.info(
         "tool.read_email.done",
@@ -69,7 +82,9 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
     return {
         "message_id": msg.message_id,
         "pm_id": msg.pm_id,
-        "from": f"{msg.sender_name} <{msg.sender_email}>" if msg.sender_name else msg.sender_email,
+        "from": (
+            f"{msg.sender_name} <{msg.sender_email}>" if msg.sender_name else msg.sender_email
+        ),
         "to": msg.recipients,
         "subject": msg.subject,
         "date": _format_date(msg.date),
@@ -81,9 +96,7 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
     }
 
 
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Attachments"}
-)
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Attachments"})
 async def list_attachments(message_id: str, folder: str | None = None) -> list[dict[str, Any]]:
     """List attachments on an email.
 
@@ -98,6 +111,7 @@ async def list_attachments(message_id: str, folder: str | None = None) -> list[d
         return []
 
     from email_mcp.db import _row_to_message
+
     msg = _row_to_message(row)
 
     if not msg.has_attachments:
@@ -106,7 +120,9 @@ async def list_attachments(message_id: str, folder: str | None = None) -> list[d
     attachments = db.attachments.list_for_message(msg.pm_id)
 
     if not attachments and not msg.body_indexed:
-        return [{"note": "Attachment metadata not yet indexed. Body indexing is still in progress."}]
+        return [
+            {"note": "Attachment metadata not yet indexed. Body indexing is still in progress."}
+        ]
 
     logger.info("tool.list_attachments.done", count=len(attachments))
     return [
@@ -143,11 +159,15 @@ async def download_attachment(
         return [f"Message not found: {message_id}"]
 
     from email_mcp.db import _row_to_message
+
     msg = _row_to_message(row)
 
     att = db.attachments.get(msg.pm_id, filename)
     if att is None:
-        return [f"Attachment '{filename}' not found. Run list_attachments first to confirm the filename."]
+        return [
+            f"Attachment '{filename}' not found."
+            " Run list_attachments first to confirm the filename."
+        ]
 
     if _decryptor is None:
         return ["Decryptor not initialized — attachment download unavailable."]
@@ -156,9 +176,7 @@ async def download_attachment(
         return ["Attachment metadata missing att_id — message may need re-indexing."]
 
     try:
-        content = await _decryptor.fetch_attachment(
-            att["att_id"], att.get("key_packets", "")
-        )
+        content = await _decryptor.fetch_attachment(att["att_id"], att.get("key_packets", ""))
     except Exception as e:
         return [f"Failed to fetch attachment: {e}"]
 
@@ -175,13 +193,19 @@ async def download_attachment(
             tmp_path = Path(f.name)
         try:
             import pymupdf
+
             doc = pymupdf.open(str(tmp_path))
-            pages = [f"## Page {i+1}\n\n{page.get_text('text').strip()}"
-                     for i, page in enumerate(doc) if page.get_text("text").strip()]
+            pages = [
+                f"## Page {i + 1}\n\n{page.get_text('text').strip()}"
+                for i, page in enumerate(doc)
+                if page.get_text("text").strip()
+            ]
             doc.close()
             output = [f"# {filename} ({size} bytes)\n\n" + "\n\n".join(pages)]
         except ImportError:
-            output = [f"# {filename} ({size} bytes)\n\n(pymupdf not installed — cannot extract PDF text)"]
+            output = [
+                f"# {filename} ({size} bytes)\n\n(pymupdf not installed — cannot extract PDF text)"
+            ]
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -199,7 +223,9 @@ async def download_attachment(
 
     else:
         encoded = base64.b64encode(content).decode()
-        mime_type = att["mime_type"] or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        mime_type = (
+            att["mime_type"] or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        )
         output = [
             f"Binary file: {filename} ({size} bytes, {mime_type})\n"
             f"Base64-encoded content:\n{encoded}"
