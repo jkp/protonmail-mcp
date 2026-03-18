@@ -44,7 +44,7 @@ class ProtonDecryptor:
             return "", self._extract_attachments(msg)
 
         try:
-            plaintext = self._key_ring.decrypt(body)
+            plaintext = await asyncio.to_thread(self._key_ring.decrypt, body)
         except DecryptionError:
             logger.warning("decryptor.decrypt_failed", pm_id=pm_id)
             raise
