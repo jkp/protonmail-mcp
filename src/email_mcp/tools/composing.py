@@ -1,5 +1,6 @@
 """Composing tools: send, reply, forward using stdlib email + aiosmtplib."""
 
+from datetime import UTC
 from email.message import EmailMessage
 from typing import Any
 
@@ -41,23 +42,27 @@ def _build_original_email(message_id: str) -> EmailMessage | None:
 
     # Construct a minimal EmailMessage with headers the composer needs
     email = EmailMessage()
-    email["From"] = f"{msg_row.sender_name} <{msg_row.sender_email}>" if msg_row.sender_name else msg_row.sender_email
+    email["From"] = (
+        f"{msg_row.sender_name} <{msg_row.sender_email}>"
+        if msg_row.sender_name
+        else msg_row.sender_email
+    )
     to_addrs = ", ".join(
-        f"{r['name']} <{r['email']}>" if r.get("name") else r["email"]
-        for r in msg_row.recipients
+        f"{r['name']} <{r['email']}>" if r.get("name") else r["email"] for r in msg_row.recipients
     )
     email["To"] = to_addrs
     email["Subject"] = msg_row.subject or ""
     if msg_row.message_id:
         email["Message-ID"] = f"<{msg_row.message_id}>"
-    from datetime import datetime, timezone
-    email["Date"] = datetime.fromtimestamp(msg_row.date, tz=timezone.utc).strftime(
+    from datetime import datetime
+
+    email["Date"] = datetime.fromtimestamp(msg_row.date, tz=UTC).strftime(
         "%a, %d %b %Y %H:%M:%S %z"
     )
     # Strip HTML tags for plain text quoting
-    from email_mcp.convert import html_to_markdown
-    if body_text.strip().startswith("<"):
-        body_text = html_to_markdown(body_text)
+    from email_mcp.convert import body_for_display
+
+    body_text = body_for_display(body_text)
     email.set_content(body_text)
 
     return email

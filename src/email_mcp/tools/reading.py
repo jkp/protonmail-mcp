@@ -61,15 +61,14 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
             "detail": "Message not found in local database. May not have been synced yet.",
         }
 
-    from email_mcp.convert import html_to_markdown
+    from email_mcp.convert import body_for_display
     from email_mcp.db import _row_to_message
 
     msg = _row_to_message(row)
     body = db.bodies.get(msg.pm_id) or ""
 
     # Convert HTML to markdown for efficient LLM consumption
-    if body.strip().startswith(("<", "<!")):
-        body = html_to_markdown(body)
+    body = body_for_display(body)
 
     logger.info(
         "tool.read_email.done",

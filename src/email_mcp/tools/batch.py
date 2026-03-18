@@ -85,6 +85,7 @@ async def _api_mark_read_chunks(pm_ids: list[str]) -> tuple[int, list[str]]:
 
 def _optimistic_update_folder(pm_ids: list[str], folder: str) -> None:
     from email_mcp.tools.managing import _FOLDER_TO_LABEL
+
     label_id = _FOLDER_TO_LABEL.get(folder, "")
     for pm_id in pm_ids:
         db.execute(
@@ -110,9 +111,7 @@ def _optimistic_mark_read(pm_ids: list[str]) -> None:
 @mcp.tool(
     annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Batch Read Emails"}
 )
-async def batch_read(
-    message_ids: list[str], folder: str | None = None
-) -> list[dict[str, Any]]:
+async def batch_read(message_ids: list[str], folder: str | None = None) -> list[dict[str, Any]]:
     """Read multiple emails in one call.
 
     Returns a list of email dicts (same shape as read_email), with
@@ -137,16 +136,17 @@ async def batch_read(
                 "message_id": message_id,
                 "detail": "Message not found in local database.",
             }
-        from email_mcp.convert import html_to_markdown
+        from email_mcp.convert import body_for_display
 
         msg = _row_to_message(row)
         body = db.bodies.get(msg.pm_id) or ""
-        if body.strip().startswith(("<", "<!")):
-            body = html_to_markdown(body)
+        body = body_for_display(body)
         return {
             "message_id": msg.message_id,
             "pm_id": msg.pm_id,
-            "from": f"{msg.sender_name} <{msg.sender_email}>" if msg.sender_name else msg.sender_email,
+            "from": f"{msg.sender_name} <{msg.sender_email}>"
+            if msg.sender_name
+            else msg.sender_email,
             "to": msg.recipients,
             "subject": msg.subject,
             "date": msg.date,
@@ -165,9 +165,7 @@ async def batch_read(
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Batch Archive Emails"})
-async def batch_archive(
-    message_ids: list[str], folder: str = "INBOX"
-) -> dict[str, Any]:
+async def batch_archive(message_ids: list[str], folder: str = "INBOX") -> dict[str, Any]:
     """Archive multiple emails by Message-ID.
 
     For bulk operations (e.g. archiving all newsletters), prefer
@@ -191,9 +189,7 @@ async def batch_archive(
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Batch Mark Read"})
-async def batch_mark_read(
-    message_ids: list[str], folder: str | None = None
-) -> dict[str, Any]:
+async def batch_mark_read(message_ids: list[str], folder: str | None = None) -> dict[str, Any]:
     """Mark multiple emails as read by Message-ID.
 
     For bulk operations prefer search_and_mark_read which takes a query.
@@ -251,6 +247,7 @@ async def batch_delete(
 
 
 # ── Query-based batch operations ──────────────────────────────────────────────
+
 
 def _query_to_pm_ids(
     query: str,
