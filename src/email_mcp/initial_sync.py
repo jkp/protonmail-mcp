@@ -108,11 +108,6 @@ class InitialSync:
             self._progress.metadata_done()
         logger.info("initial_sync.metadata_done", synced=synced)
 
-        # Kick off body indexing per folder (background, best-effort)
-        if self._progress:
-            self._progress.set_bodies_total(synced)
-        for folder in folders_seen:
-            await self._body_indexer.index_folder(folder)
-
+        # Body indexing is handled by the bulk reindex background task in server.py
         self._db.sync_state.set("initial_sync_done", "1")
         logger.info("initial_sync.done", folders=len(folders_seen))

@@ -32,10 +32,14 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize v4 components: ProtonMail API, event loop, body indexer."""
+    import json
+
     import email_mcp.tools.batch as batch
     import email_mcp.tools.managing as managing
     import email_mcp.tools.reading as reading
     from email_mcp.body_indexer import BodyIndexer
+    from email_mcp.crypto import ProtonKeyRing, derive_mailbox_passphrase
+    from email_mcp.decryptor import ProtonDecryptor
     from email_mcp.event_loop import EventLoop
     from email_mcp.imap import ImapMutator
     from email_mcp.initial_sync import InitialSync
@@ -49,7 +53,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         session_path=settings.proton_session_file,
     )
 
-    # 2. Connect Bridge IMAP for body indexer
+    # 2. Connect Bridge IMAP (still needed for mutations + attachment download)
     imap_cert = settings.imap_cert_path or settings.smtp_cert_path
     imap = ImapMutator(
         host=settings.imap_host,
@@ -60,20 +64,18 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         cert_path=imap_cert,
     )
 
-    # 3. Set refs on tools (imap now defined)
+    # 3. Set refs on tools
     managing._api = api
     batch._api = api
     reading._imap = imap
 
     progress = SyncProgress()
     event_loop = EventLoop(db=db, api=api)
-    body_indexer = BodyIndexer(db=db, imap=imap, workers=3, progress=progress)
-    initial_sync = InitialSync(db=db, api=api, body_indexer=body_indexer, progress=progress)
 
     background_tasks: list[asyncio.Task] = []
 
     try:
-        # 4. Connect Bridge IMAP (non-fatal if unavailable)
+        # 4. Connect Bridge IMAP (non-fatal — only needed for mutations)
         try:
             await imap.connect()
             logger.info("server.imap_connected")
@@ -90,6 +92,40 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         except Exception:
             logger.warning("server.api_check_failed", exc_info=True)
 
+        # 5b. Load PGP keys for message decryption (non-fatal)
+        decryptor: ProtonDecryptor | None = None
+        try:
+            session_data = json.loads(settings.proton_session_file.read_text())
+            key_salts = session_data.get("key_salts", {})
+            user_data = await api.get_user()
+            user_key = user_data["Keys"][0]
+            key_salt = key_salts.get(user_key["ID"])
+            if key_salt:
+                passphrase = derive_mailbox_passphrase(settings.proton_password, key_salt)
+            else:
+                passphrase = settings.proton_password
+            key_ring = ProtonKeyRing(user_key["PrivateKey"], passphrase)
+
+            # Load address keys
+            addresses = await api.get_addresses()
+            for addr in addresses:
+                for ak in addr.get("Keys", []):
+                    token = ak.get("Token", "")
+                    if token:
+                        try:
+                            key_ring.add_address_key(ak["PrivateKey"], token)
+                        except Exception:
+                            logger.debug("server.address_key_skip", email=addr.get("Email"), exc_info=True)
+
+            decryptor = ProtonDecryptor(api=api, key_ring=key_ring)
+            logger.info("server.keys_loaded", address_keys=len(addresses))
+        except Exception:
+            logger.warning("server.key_load_failed", exc_info=True,
+                           detail="Body decryption unavailable — run 'email-mcp-auth' with 2FA")
+
+        body_indexer = BodyIndexer(db=db, decryptor=decryptor, workers=3, progress=progress) if decryptor else None
+        initial_sync = InitialSync(db=db, api=api, body_indexer=body_indexer, progress=progress)
+
         # 6a. Always sync labels (fast, resolves custom folder names)
         try:
             await initial_sync.sync_labels()
@@ -104,55 +140,26 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             logger.warning("server.initial_sync_failed", exc_info=True)
 
         async def _bulk_reindex_bodies() -> None:
-            """Background task: bulk re-index folders with unindexed bodies, then fall back to queue."""
-            unindexed_folders = db.execute(
-                "SELECT DISTINCT folder FROM messages"
-                " WHERE body_indexed = 0 AND message_id IS NOT NULL"
-                "   AND folder IS NOT NULL AND folder != 'All Mail'"
-            ).fetchall()
-            if not unindexed_folders:
+            """Background task: bulk-fetch and decrypt all unindexed bodies via API."""
+            if not body_indexer:
+                logger.warning("server.bulk_reindex_skipped", reason="no decryptor")
                 return
-            folders = [r[0] for r in unindexed_folders]
-            logger.info("server.bulk_reindex_start", folders=folders)
+            unindexed_count = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE body_indexed = 0"
+            ).fetchone()[0]
+            if not unindexed_count:
+                return
+            logger.info("server.bulk_reindex_start", count=unindexed_count)
             try:
                 with progress:
-                    progress.set_bodies_total(
-                        db.execute(
-                            "SELECT COUNT(*) FROM messages WHERE body_indexed = 0 AND message_id IS NOT NULL"
-                        ).fetchone()[0]
-                    )
-                    for folder in folders:
-                        await body_indexer.index_folder(folder)
+                    progress.set_bodies_total(unindexed_count)
+                    await body_indexer.index_unindexed()
             except Exception:
                 logger.warning("server.bulk_reindex_failed", exc_info=True)
-            # Queue any still-unindexed messages for per-message retry
-            still_unindexed = db.execute(
-                "SELECT pm_id FROM messages WHERE body_indexed = 0 AND message_id IS NOT NULL"
-            ).fetchall()
-            queued = 0
-            for (pm_id,) in still_unindexed:
-                try:
-                    event_loop.body_queue.put_nowait(pm_id)
-                    queued += 1
-                except asyncio.QueueFull:
-                    break
-            logger.info("server.bulk_reindex_done", queued_remaining=queued)
-
-        async def _requeue_unindexed_loop() -> None:
-            while True:
-                await asyncio.sleep(6 * 3600)
-                rows = db.execute(
-                    "SELECT pm_id FROM messages WHERE body_indexed = 0 AND message_id IS NOT NULL"
-                ).fetchall()
-                queued = 0
-                for (pm_id,) in rows:
-                    try:
-                        event_loop.body_queue.put_nowait(pm_id)
-                        queued += 1
-                    except asyncio.QueueFull:
-                        break
-                if queued:
-                    logger.info("server.requeued_unindexed_periodic", count=queued)
+            remaining = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE body_indexed = 0"
+            ).fetchone()[0]
+            logger.info("server.bulk_reindex_done", remaining=remaining)
 
         # 7b. Start bulk body re-index as background task (non-blocking)
         background_tasks.append(
@@ -164,17 +171,13 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             asyncio.create_task(event_loop.run(), name="event_loop")
         )
 
-        # 9. Start body indexer worker queue
-        background_tasks.append(
-            asyncio.create_task(
-                body_indexer.run_workers(event_loop.body_queue), name="body_indexer"
+        # 9. Start body indexer worker queue (for ongoing events)
+        if body_indexer:
+            background_tasks.append(
+                asyncio.create_task(
+                    body_indexer.run_workers(event_loop.body_queue), name="body_indexer"
+                )
             )
-        )
-
-        # 10. Periodic requeue of un-indexed bodies
-        background_tasks.append(
-            asyncio.create_task(_requeue_unindexed_loop(), name="requeue_unindexed")
-        )
 
         logger.info("server.ready")
         yield
@@ -187,11 +190,12 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             await asyncio.gather(*background_tasks, return_exceptions=True)
 
         # Send sentinel to drain body queue workers cleanly
-        try:
-            for _ in range(body_indexer._workers):
-                event_loop.body_queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
+        if body_indexer:
+            try:
+                for _ in range(body_indexer._workers):
+                    event_loop.body_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
 
         await imap.disconnect()
         managing._api = None

@@ -112,12 +112,12 @@ class TestInitialSync:
         # event ID should be fetched before messages
         assert mock_api.get_latest_event_id.call_count == 1
 
-    async def test_triggers_body_indexing_per_folder(
+    async def test_marks_done_after_metadata_sync(
         self, sync: InitialSync, db: Database, mock_body_indexer: MagicMock
     ) -> None:
         await sync.run()
-        # Should index bodies for each unique folder seen
-        mock_body_indexer.index_folder.assert_called()
+        # Body indexing is now handled by server.py bulk reindex, not initial_sync
+        assert db.sync_state.get("initial_sync_done") == "1"
 
     async def test_does_not_mark_done_on_error(
         self, sync: InitialSync, db: Database, mock_api: MagicMock
