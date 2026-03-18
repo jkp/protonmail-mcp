@@ -68,19 +68,32 @@ class ParsedQuery:
     def to_sql(self, limit: int, offset: int = 0) -> tuple[str, list[Any]]:
         """Generate a complete SELECT SQL and parameter list."""
         if self.fts_terms:
-            sql = """
-                SELECT m.*
-                FROM messages m
-                JOIN message_bodies mb ON mb.pm_id = m.pm_id
-                JOIN fts_bodies f ON f.rowid = mb.rowid
-                WHERE fts_bodies MATCH ?
+            # Search body (FTS5), sender_name, sender_email, and subject
+            where_filter = f"AND {self.where}" if self.where != "1" else ""
+            sql = f"""
+                SELECT m.* FROM messages m
+                LEFT JOIN message_bodies mb ON mb.pm_id = m.pm_id
+                LEFT JOIN fts_bodies f ON f.rowid = mb.rowid
+                WHERE (
+                    fts_bodies MATCH ?
+                    OR m.sender_name LIKE ?
+                    OR m.sender_email LIKE ?
+                    OR m.subject LIKE ?
+                )
                 {where_filter}
-                ORDER BY rank, m.date DESC
+                ORDER BY m.date DESC
                 LIMIT ? OFFSET ?
-            """.format(
-                where_filter=f"AND {self.where}" if self.where != "1" else ""
-            )
-            params = [self.fts_terms, *self.params, limit, offset]
+            """
+            like_term = f"%{self.fts_terms.strip('\"')}%"
+            params = [
+                self.fts_terms,
+                like_term,
+                like_term,
+                like_term,
+                *self.params,
+                limit,
+                offset,
+            ]
         else:
             sql = """
                 SELECT * FROM messages
@@ -136,8 +149,10 @@ def _sanitize_fts(text: str) -> str:
 
 def _apply_operator(result: ParsedQuery, op: str, val: str) -> None:
     if op == "from":
-        result.where_clauses.append("sender_email LIKE ?")
-        result.params.append(f"%{val}%")
+        result.where_clauses.append(
+            "(sender_email LIKE ? OR sender_name LIKE ?)"
+        )
+        result.params.extend([f"%{val}%", f"%{val}%"])
 
     elif op == "to":
         result.where_clauses.append("recipients LIKE ?")
