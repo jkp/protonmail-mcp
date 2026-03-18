@@ -92,9 +92,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 user_key_id = user_data["Keys"][0]["ID"]
                 key_salt = key_salts.get(user_key_id)
                 if key_salt and settings.proton_password:
-                    passphrase = derive_mailbox_passphrase(
-                        settings.proton_password, key_salt
-                    )
+                    passphrase = derive_mailbox_passphrase(settings.proton_password, key_salt)
                 elif settings.proton_password:
                     passphrase = settings.proton_password
                 else:
@@ -183,9 +181,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             logger.info(
                 "server.bulk_reindex_start",
                 count=unindexed_count,
-                folders=[
-                    f"{r[0] or 'NULL'}:{r[1]}" for r in priority_folders
-                ],
+                folders=[f"{r[0] or 'NULL'}:{r[1]}" for r in priority_folders],
             )
             try:
                 with progress:
@@ -222,23 +218,24 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             """Background task: embed body-indexed messages for vector search."""
             if not embedder:
                 return
+            import concurrent.futures
+
+            # Dedicated thread pool so embedding doesn't compete with body indexer
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="embedder")
+            loop = asyncio.get_event_loop()
             while True:
                 pm_ids = embedder.get_unembedded(limit=200)
                 if not pm_ids:
                     await asyncio.sleep(30)
                     continue
-                count = await asyncio.to_thread(
-                    embedder.embed_batch, pm_ids
-                )
+                count = await loop.run_in_executor(pool, embedder.embed_batch, pm_ids)
                 logger.info(
                     "server.embed_progress",
                     embedded=count,
                     batch=len(pm_ids),
                 )
 
-        background_tasks.append(
-            asyncio.create_task(_embed_bodies(), name="embed_bodies")
-        )
+        background_tasks.append(asyncio.create_task(_embed_bodies(), name="embed_bodies"))
 
         # 8. Start event loop background task
         background_tasks.append(asyncio.create_task(event_loop.run(), name="event_loop"))
