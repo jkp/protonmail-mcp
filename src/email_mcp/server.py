@@ -25,7 +25,12 @@ from email_mcp.logging import configure_logging
 
 settings = Settings()
 _log_file = settings.database_path.parent / "email-mcp.log"
-configure_logging(settings.log_level, ntfy_url=settings.ntfy_url, ntfy_topic=settings.ntfy_topic, log_file=_log_file)
+configure_logging(
+    settings.log_level,
+    ntfy_url=settings.ntfy_url,
+    ntfy_topic=settings.ntfy_topic,
+    log_file=_log_file,
+)
 
 logger = structlog.get_logger()
 
@@ -96,7 +101,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                         try:
                             key_ring.add_address_key(ak["PrivateKey"], token)
                         except Exception:
-                            logger.debug("server.address_key_skip", email=addr.get("Email"), exc_info=True)
+                            logger.debug(
+                                "server.address_key_skip",
+                                email=addr.get("Email"),
+                                exc_info=True,
+                            )
 
             decryptor = ProtonDecryptor(api=api, key_ring=key_ring)
             reading._decryptor = decryptor
@@ -105,7 +114,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             logger.warning("server.key_load_failed", exc_info=True,
                            detail="Body decryption unavailable — run 'email-mcp-auth' with 2FA")
 
-        body_indexer = BodyIndexer(db=db, decryptor=decryptor, workers=3, progress=progress) if decryptor else None
+        body_indexer = (
+            BodyIndexer(db=db, decryptor=decryptor, workers=3, progress=progress)
+            if decryptor
+            else None
+        )
         initial_sync = InitialSync(db=db, api=api, body_indexer=body_indexer, progress=progress)
 
         # 6a. Always sync labels (fast, resolves custom folder names)
@@ -293,16 +306,6 @@ import email_mcp.tools.searching  # noqa: F401, E402
 
 def main() -> None:
     """Entry point for the MCP server."""
-    import signal
-    import sys
-
-    # Clean shutdown on Ctrl+C — suppress traceback
-    def _sigint_handler(sig, frame):
-        logger.info("server.interrupted")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _sigint_handler)
-
     logger.info(
         "server.starting",
         transport=settings.transport,
@@ -317,5 +320,8 @@ def main() -> None:
             mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)
         else:
             mcp.run(log_level="WARNING")
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("server.shutdown")
+    except Exception:
+        logger.error("server.crashed", exc_info=True)
+        raise
