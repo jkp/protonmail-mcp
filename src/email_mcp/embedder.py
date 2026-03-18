@@ -121,13 +121,16 @@ class Embedder:
         """Embed a batch of messages. Returns count of successfully embedded."""
         texts = []
         valid_ids = []
+        skip_ids = []
 
         for pm_id in pm_ids:
             body = self._db.bodies.get(pm_id)
             if not body:
+                skip_ids.append(pm_id)
                 continue
             msg = self._db.messages.get(pm_id)
             if not msg:
+                skip_ids.append(pm_id)
                 continue
 
             # Embed body only — sender/subject are already covered by FTS5+LIKE.
@@ -135,6 +138,17 @@ class Embedder:
             text = f"{_DOC_PREFIX}{body[:_MAX_BODY_CHARS]}"
             texts.append(text)
             valid_ids.append(pm_id)
+
+        # Mark skipped messages as -1 (nothing to embed) so they
+        # don't get re-queued forever. Distinct from 1 (embedded OK).
+        for pm_id in skip_ids:
+            self._db.execute(
+                "UPDATE messages SET embedded = -1 WHERE pm_id = ?",
+                [pm_id],
+            )
+        if skip_ids:
+            self._db.commit()
+            logger.info("embedder.skipped_empty", count=len(skip_ids))
 
         if not texts:
             return 0

@@ -87,8 +87,9 @@ class TestEmbedBatch:
 
         embedder.embed_batch(["pm-1"])
 
-        msg = db.messages.get("pm-1")
-        assert msg.embedded is False
+        # -1 = nothing to embed (empty body), won't be re-queued
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == -1
 
     def test_skips_unknown_pm_ids(self, embedder, db):
         embedder.embed_batch(["nonexistent"])  # should not raise
