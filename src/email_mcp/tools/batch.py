@@ -88,7 +88,8 @@ def _optimistic_update_folder(pm_ids: list[str], folder: str) -> None:
     label_id = _FOLDER_TO_LABEL.get(folder, "")
     for pm_id in pm_ids:
         db.execute(
-            "UPDATE messages SET folder = ?, label_ids = ?, updated_at = unixepoch() WHERE pm_id = ?",
+            "UPDATE messages SET folder = ?, label_ids = ?,"
+            " updated_at = unixepoch() WHERE pm_id = ?",
             [folder, f'["{label_id}"]', pm_id],
         )
     db.commit()
@@ -136,8 +137,12 @@ async def batch_read(
                 "message_id": message_id,
                 "detail": "Message not found in local database.",
             }
+        from email_mcp.convert import html_to_markdown
+
         msg = _row_to_message(row)
         body = db.bodies.get(msg.pm_id) or ""
+        if body.strip().startswith(("<", "<!")):
+            body = html_to_markdown(body)
         return {
             "message_id": msg.message_id,
             "pm_id": msg.pm_id,
