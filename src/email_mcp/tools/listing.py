@@ -39,6 +39,7 @@ async def list_emails(
     logger.info("tool.list_emails.done", count=len(rows), total=total)
     return {
         "total": total,
+        "unread": counts["unread"],
         "offset": offset,
         "count": len(rows),
         "emails": [
