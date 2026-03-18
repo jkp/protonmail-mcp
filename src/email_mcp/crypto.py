@@ -156,5 +156,8 @@ class ProtonKeyRing:
         """Decrypt an armored PGP message with the given key."""
         msg = pgpy.PGPMessage.from_blob(armored_message)
         with key.unlock(key._passphrase):
-            decrypted = key.decrypt(msg)
+            try:
+                decrypted = key.decrypt(msg)
+            except Exception as e:
+                raise DecryptionError(str(e)) from e
         return str(decrypted.message)

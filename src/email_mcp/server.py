@@ -293,6 +293,16 @@ import email_mcp.tools.searching  # noqa: F401, E402
 
 def main() -> None:
     """Entry point for the MCP server."""
+    import signal
+    import sys
+
+    # Clean shutdown on Ctrl+C — suppress traceback
+    def _sigint_handler(sig, frame):
+        logger.info("server.interrupted")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     logger.info(
         "server.starting",
         transport=settings.transport,
@@ -302,7 +312,10 @@ def main() -> None:
         log_level=settings.log_level,
         db_path=str(settings.database_path),
     )
-    if settings.transport == "http":
-        mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)
-    else:
-        mcp.run(log_level="WARNING")
+    try:
+        if settings.transport == "http":
+            mcp.run(transport="http", host=settings.host, port=settings.port, stateless_http=True)
+        else:
+            mcp.run(log_level="WARNING")
+    except KeyboardInterrupt:
+        pass
