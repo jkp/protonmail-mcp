@@ -510,8 +510,8 @@ dependencies = [
     { name = "aiosmtplib" },
     { name = "einops" },
     { name = "fastmcp" },
-    { name = "html2text" },
     { name = "httpx" },
+    { name = "justhtml" },
     { name = "msgpack" },
     { name = "pgpy13" },
     { name = "proton-client" },
@@ -539,8 +539,8 @@ requires-dist = [
     { name = "aiosmtplib", specifier = ">=3.0" },
     { name = "einops", specifier = ">=0.8.2" },
     { name = "fastmcp", specifier = "==3.0.2" },
-    { name = "html2text", specifier = ">=2024.2.26" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "justhtml", specifier = ">=1.12.0" },
     { name = "msgpack", specifier = ">=1.1.2" },
     { name = "pgpy13", specifier = ">=0.6.1rc1" },
     { name = "proton-client", specifier = ">=0.5.1" },
@@ -673,15 +673,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/54/75/07f6aa680575d9646c4167db6407c41340cbe2357f5654c4e72a1b01ca14/hf_xet-1.4.2-cp37-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:6b0932eb8b10317ea78b7da6bab172b17be03bbcd7809383d8d5abd6a2233e04", size = 4432751, upload-time = "2026-03-13T06:58:46.533Z" },
     { url = "https://files.pythonhosted.org/packages/cd/71/193eabd7e7d4b903c4aa983a215509c6114915a5a237525ec562baddb868/hf_xet-1.4.2-cp37-abi3-win_amd64.whl", hash = "sha256:ad185719fb2e8ac26f88c8100562dbf9dbdcc3d9d2add00faa94b5f106aea53f", size = 3671149, upload-time = "2026-03-13T06:58:57.07Z" },
     { url = "https://files.pythonhosted.org/packages/b4/7e/ccf239da366b37ba7f0b36095450efae4a64980bdc7ec2f51354205fdf39/hf_xet-1.4.2-cp37-abi3-win_arm64.whl", hash = "sha256:32c012286b581f783653e718c1862aea5b9eb140631685bb0c5e7012c8719a87", size = 3533426, upload-time = "2026-03-13T06:58:55.46Z" },
-]
-
-[[package]]
-name = "html2text"
-version = "2025.4.15"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f8/27/e158d86ba1e82967cc2f790b0cb02030d4a8bef58e0c79a8590e9678107f/html2text-2025.4.15.tar.gz", hash = "sha256:948a645f8f0bc3abe7fd587019a2197a12436cd73d0d4908af95bfc8da337588", size = 64316, upload-time = "2025-04-15T04:02:30.045Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/84/1a0f9555fd5f2b1c924ff932d99b40a0f8a6b12f6dd625e2a47f415b00ea/html2text-2025.4.15-py3-none-any.whl", hash = "sha256:00569167ffdab3d7767a4cdf589b7f57e777a5ed28d12907d8c58769ec734acc", size = 34656, upload-time = "2025-04-15T04:02:28.44Z" },
 ]
 
 [[package]]
@@ -882,6 +873,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "justhtml"
+version = "1.12.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/bb/aad995e1e99ff7dc99b45e639efb6a116d887399984e2d214c322b665320/justhtml-1.12.0.tar.gz", hash = "sha256:ef6d6b020c690db07db4359e2c921e7fc3770e8e61887ea4b57b2d53388c2265", size = 378536, upload-time = "2026-03-17T21:58:54.113Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/f4/acb12ff9d842ffa959d3366e25279c406f2a2211a24ad561e231ef8356b9/justhtml-1.12.0-py3-none-any.whl", hash = "sha256:4ca4d110694d51c4643e992ee72fe68c1eca343011de3370f54c15cab32c24a8", size = 134831, upload-time = "2026-03-17T21:58:52.7Z" },
 ]
 
 [[package]]

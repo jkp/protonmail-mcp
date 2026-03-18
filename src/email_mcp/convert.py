@@ -2,12 +2,7 @@
 
 import re
 
-import html2text
-
-_converter = html2text.HTML2Text()
-_converter.body_width = 0
-_converter.ignore_images = False
-_converter.ignore_links = False
+from justhtml import JustHTML
 
 # Matches common HTML start patterns (with optional whitespace/BOM)
 _HTML_PATTERN = re.compile(
@@ -22,10 +17,15 @@ def _is_html(text: str) -> bool:
 
 
 def html_to_markdown(html: str | None) -> str:
-    """Convert HTML content to readable markdown."""
+    """Convert HTML content to readable markdown.
+
+    Uses justhtml — a spec-compliant HTML5 parser with browser-grade
+    error recovery. Handles malformed Office HTML that crashes html2text.
+    """
     if not html:
         return ""
-    return _converter.handle(html).strip()
+    doc = JustHTML(html, sanitize=False)
+    return doc.to_markdown().strip()
 
 
 def body_for_display(body: str) -> str:
