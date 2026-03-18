@@ -206,7 +206,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         try:
             from email_mcp.embedder import Embedder
 
-            embedder = Embedder(db=db)
+            embedder = Embedder(db=db, api_key=settings.together_api_key)
             import email_mcp.tools.searching as searching_mod
 
             searching_mod._embedder = embedder

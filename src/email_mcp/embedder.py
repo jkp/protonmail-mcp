@@ -47,10 +47,11 @@ class Embedder:
         db: Database,
         model: Any = None,
         model_name: str = _DEFAULT_MODEL,
+        api_key: str = "",
     ) -> None:
         self._db = db
         self._model_name = model_name
-        self._together_key = os.environ.get("TOGETHER_API_KEY", "")
+        self._together_key = api_key
         self._ensure_table()
         if model is not None:
             self._model = model

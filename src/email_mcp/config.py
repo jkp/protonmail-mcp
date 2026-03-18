@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     port: int = 10143
     log_level: str = "INFO"
 
+    # Embedding API (optional — local model used as fallback)
+    together_api_key: str = ""
+
     # Auth (optional, for HTTP transport)
     github_client_id: str | None = None
     github_client_secret: str | None = None
