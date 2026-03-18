@@ -1,13 +1,15 @@
 """FastMCP server instance and entry point.
 
-v4 startup sequence:
+v5 startup sequence:
 1. Open SQLite database
 2. Create ProtonMail API client (load saved session)
-3. Connect Bridge IMAP (for body indexer only)
+3. Load PGP keys for message decryption
 4. Run InitialSync (idempotent — no-op if already done)
 5. Start EventLoop background task (ProtonMail event polling)
-6. Start BodyIndexer worker queue (IMAP body fetch + FTS index)
+6. Start BodyIndexer worker queue (API fetch + PGP decrypt + FTS index)
 7. Accept MCP connections
+
+No Bridge IMAP dependency — all operations use the ProtonMail REST API directly.
 """
 
 import asyncio
@@ -20,7 +22,6 @@ from fastmcp import FastMCP
 from email_mcp.config import Settings
 from email_mcp.db import Database
 from email_mcp.logging import configure_logging
-from email_mcp.store import MaildirStore
 
 settings = Settings()
 _log_file = settings.database_path.parent / "email-mcp.log"
@@ -31,7 +32,7 @@ logger = structlog.get_logger()
 
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
-    """Initialize v4 components: ProtonMail API, event loop, body indexer."""
+    """Initialize v5 components: ProtonMail API, PGP keys, event loop, body indexer."""
     import json
 
     import email_mcp.tools.batch as batch
@@ -41,7 +42,6 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     from email_mcp.crypto import ProtonKeyRing, derive_mailbox_passphrase
     from email_mcp.decryptor import ProtonDecryptor
     from email_mcp.event_loop import EventLoop
-    from email_mcp.imap import ImapMutator
     from email_mcp.initial_sync import InitialSync
     from email_mcp.progress import SyncProgress
     from email_mcp.proton_api import AuthError, ProtonClient
@@ -53,21 +53,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         session_path=settings.proton_session_file,
     )
 
-    # 2. Connect Bridge IMAP (still needed for mutations + attachment download)
-    imap_cert = settings.imap_cert_path or settings.smtp_cert_path
-    imap = ImapMutator(
-        host=settings.imap_host,
-        port=settings.imap_port,
-        username=settings.imap_username,
-        password=settings.imap_password,
-        starttls=settings.imap_starttls,
-        cert_path=imap_cert,
-    )
-
-    # 3. Set refs on tools
+    # 2. Set refs on tools
     managing._api = api
     batch._api = api
-    reading._imap = imap
 
     progress = SyncProgress()
     event_loop = EventLoop(db=db, api=api)
@@ -75,14 +63,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     background_tasks: list[asyncio.Task] = []
 
     try:
-        # 4. Connect Bridge IMAP (non-fatal — only needed for mutations)
-        try:
-            await imap.connect()
-            logger.info("server.imap_connected")
-        except Exception:
-            logger.warning("server.imap_connect_failed", exc_info=True)
-
-        # 5. Validate API session (non-fatal — may need re-auth)
+        # 3. Validate API session (non-fatal — may need re-auth)
         try:
             await api.get_latest_event_id()
             logger.info("server.api_session_valid")
@@ -92,7 +73,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         except Exception:
             logger.warning("server.api_check_failed", exc_info=True)
 
-        # 5b. Load PGP keys for message decryption (non-fatal)
+        # 4. Load PGP keys for message decryption (non-fatal)
         decryptor: ProtonDecryptor | None = None
         try:
             session_data = json.loads(settings.proton_session_file.read_text())
@@ -198,10 +179,8 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             except asyncio.QueueFull:
                 pass
 
-        await imap.disconnect()
         managing._api = None
         batch._api = None
-        reading._imap = None
         reading._decryptor = None
         logger.info("server.shutdown")
 
@@ -301,7 +280,6 @@ mcp = FastMCP(
     lifespan=_lifespan,
 )
 
-store = MaildirStore(settings.maildir_path)
 db = Database(settings.database_path)
 
 # Import tools to register them with the mcp instance

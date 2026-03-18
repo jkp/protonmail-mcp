@@ -23,22 +23,12 @@ class NotifyRule:
 
 NOTIFICATION_RULES: dict[str, NotifyRule] = {
     # Infrastructure failures — always notify, urgent priority
-    "server.imap_connect_failed": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
-    "server.full_sync_on_startup.failed": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
-    "server.startup_sync.failed": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
-    "server.idle_start_failed": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
-    # Sync failures — debounce heavily (these retry every 60s)
-    "sync.timeout": NotifyRule(priority="high", debounce_s=600, tags="warning"),
-    "sync.error": NotifyRule(priority="high", debounce_s=600, tags="warning"),
-    "sync.reindex_failed": NotifyRule(priority="high", debounce_s=600, tags="warning"),
-    # IDLE degradation — only notify when backoff is significant
-    "idle.error": NotifyRule(priority="high", debounce_s=300, tags="warning", min_backoff=60),
+    "server.key_load_failed": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
+    "server.api_auth_required": NotifyRule(priority="urgent", debounce_s=0, tags="rotating_light"),
+    # Sync failures — debounce heavily
+    "server.bulk_reindex_failed": NotifyRule(priority="high", debounce_s=600, tags="warning"),
     # Startup success — confirm notifications are working
     "server.ready": NotifyRule(priority="default", debounce_s=0, tags="white_check_mark"),
-    # IMAP mutation failures — per-failure, moderate debounce
-    "tool.archive.imap_failed": NotifyRule(priority="default", debounce_s=60, tags="email"),
-    "tool.delete.imap_failed": NotifyRule(priority="default", debounce_s=60, tags="email"),
-    "tool.move_email.imap_failed": NotifyRule(priority="default", debounce_s=60, tags="email"),
 }
 
 # Keys to extract from event_dict for notification body
