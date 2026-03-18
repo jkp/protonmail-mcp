@@ -8,6 +8,7 @@ Downstream of body indexer: only embeds messages with body_indexed=1.
 
 from __future__ import annotations
 
+import os
 import struct
 from typing import Any
 
@@ -27,14 +28,19 @@ def _serialize_f32(vector: np.ndarray) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
 
 
-_DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
-_EMBEDDING_DIMS = 768
-_QUERY_PREFIX = "search_query: "
-_DOC_PREFIX = "search_document: "
+_DEFAULT_MODEL = "intfloat/multilingual-e5-large-instruct"
+_EMBEDDING_DIMS = 1024
+_QUERY_PREFIX = "query: "
+_DOC_PREFIX = "passage: "
 
 
 class Embedder:
-    """Embed email content and search by vector similarity."""
+    """Embed email content and search by vector similarity.
+
+    Uses Together API for batch embedding (fast backfill) when
+    TOGETHER_API_KEY is set. Falls back to local model for
+    single-query inference (search) and when no API key is available.
+    """
 
     def __init__(
         self,
@@ -43,26 +49,52 @@ class Embedder:
         model_name: str = _DEFAULT_MODEL,
     ) -> None:
         self._db = db
+        self._model_name = model_name
+        self._together_key = os.environ.get("TOGETHER_API_KEY", "")
         self._ensure_table()
         if model is not None:
             self._model = model
         else:
-            import logging
-            import os
+            self._model = self._load_local_model(model_name)
 
-            # Suppress noisy model load reports and tqdm progress bars
-            logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    @staticmethod
+    def _load_local_model(model_name: str) -> Any:
+        import logging
 
-            # Let PyTorch use multiple cores for inference
-            import torch
+        logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-            torch.set_num_threads(min(4, os.cpu_count() or 1))
+        import torch
 
-            from sentence_transformers import SentenceTransformer
+        torch.set_num_threads(min(4, os.cpu_count() or 1))
 
-            self._model = SentenceTransformer(model_name, trust_remote_code=True)
-            self._model.encode(["warmup"], show_progress_bar=False)
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer(model_name, trust_remote_code=True)
+        model.encode(["warmup"], show_progress_bar=False)
+        return model
+
+    def _encode_via_api(self, texts: list[str]) -> np.ndarray:
+        """Encode texts using Together API. Returns numpy array of vectors."""
+        import httpx
+
+        resp = httpx.post(
+            "https://api.together.xyz/v1/embeddings",
+            headers={"Authorization": f"Bearer {self._together_key}"},
+            json={"model": self._model_name, "input": texts},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return np.array(
+            [d["embedding"] for d in data["data"]], dtype=np.float32
+        )
+
+    def _encode_local(self, texts: list[str]) -> np.ndarray:
+        """Encode texts using local model."""
+        return self._model.encode(
+            texts, batch_size=_BATCH_SIZE, show_progress_bar=False
+        )
 
     def _ensure_table(self) -> None:
         """Create the vectors table if it doesn't exist."""
@@ -108,9 +140,15 @@ class Embedder:
         if not texts:
             return 0
 
-        vectors = self._model.encode(
-            texts, batch_size=_BATCH_SIZE, show_progress_bar=False
-        )
+        # Use Together API for batch embedding if available (much faster)
+        if self._together_key:
+            try:
+                vectors = self._encode_via_api(texts)
+            except Exception as e:
+                logger.warning("embedder.api_failed_fallback_local", error=str(e))
+                vectors = self._encode_local(texts)
+        else:
+            vectors = self._encode_local(texts)
 
         for pm_id, vec in zip(valid_ids, vectors):
             vec_f32 = np.asarray(vec, dtype=np.float32)
@@ -127,9 +165,8 @@ class Embedder:
 
     def search(self, query: str, limit: int = 20) -> list[str]:
         """Semantic search. Returns pm_ids ranked by similarity."""
-        vec = self._model.encode(
-            [f"{_QUERY_PREFIX}{query}"], batch_size=1, show_progress_bar=False
-        )
+        # Always use local model for search (no API latency)
+        vec = self._encode_local([f"{_QUERY_PREFIX}{query}"])
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         rows = self._db.execute(
@@ -158,9 +195,8 @@ class Embedder:
         """
         # sqlite-vec requires k=? on the vec0 table directly.
         # Do vector search first (over-fetch), then post-filter with SQL.
-        vec = self._model.encode(
-            [f"{_QUERY_PREFIX}{query}"], batch_size=1, show_progress_bar=False
-        )
+        # Always use local model for search (no API latency)
+        vec = self._encode_local([f"{_QUERY_PREFIX}{query}"])
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         # Over-fetch to account for filtering
