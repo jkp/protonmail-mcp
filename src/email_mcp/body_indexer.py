@@ -87,23 +87,29 @@ class BodyIndexer:
 
     # ── Bulk index (initial sync / catchup) ──────────────────────────────────
 
-    async def index_unindexed(self, folder: str | None = None) -> None:
+    _ALL = object()  # sentinel for "all folders"
+
+    async def index_unindexed(self, folder: str | None | object = _ALL) -> None:
         """Bulk-fetch and decrypt all unindexed message bodies.
 
-        Queries DB for unindexed pm_ids, fetches in parallel batches via the
-        ProtonMail API, and indexes each body into FTS5.
-
         Args:
-            folder: Optional folder filter. If None, indexes ALL unindexed messages.
+            folder: Folder to index. Specific string = that folder.
+                    None = messages with NULL folder. _ALL (default) = everything.
         """
-        if folder:
+        if folder is self._ALL:
             rows = self._db.execute(
-                "SELECT pm_id FROM messages WHERE body_indexed = 0 AND folder = ?",
-                [folder],
+                "SELECT pm_id FROM messages WHERE body_indexed = 0"
+            ).fetchall()
+        elif folder is None:
+            rows = self._db.execute(
+                "SELECT pm_id FROM messages"
+                " WHERE body_indexed = 0 AND folder IS NULL"
             ).fetchall()
         else:
             rows = self._db.execute(
-                "SELECT pm_id FROM messages WHERE body_indexed = 0"
+                "SELECT pm_id FROM messages"
+                " WHERE body_indexed = 0 AND folder = ?",
+                [folder],
             ).fetchall()
 
         pm_ids = [r[0] for r in rows]

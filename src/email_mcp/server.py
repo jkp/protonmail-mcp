@@ -140,7 +140,10 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             logger.warning("server.initial_sync_failed", exc_info=True)
 
         async def _bulk_reindex_bodies() -> None:
-            """Background task: bulk-fetch and decrypt all unindexed bodies via API."""
+            """Background task: index unindexed bodies in priority order.
+
+            INBOX first, then Sent/Archive/labels, then folder=NULL last.
+            """
             if not body_indexer:
                 logger.warning("server.bulk_reindex_skipped", reason="no decryptor")
                 return
@@ -149,11 +152,35 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             ).fetchone()[0]
             if not unindexed_count:
                 return
-            logger.info("server.bulk_reindex_start", count=unindexed_count)
+
+            # Priority order: INBOX first, then real folders, then NULL
+            priority_folders = db.execute(
+                "SELECT folder, COUNT(*) as cnt FROM messages"
+                " WHERE body_indexed = 0"
+                " GROUP BY folder"
+                " ORDER BY"
+                "   CASE"
+                "     WHEN folder = 'INBOX' THEN 0"
+                "     WHEN folder = 'Sent' THEN 1"
+                "     WHEN folder = 'Drafts' THEN 2"
+                "     WHEN folder IS NOT NULL THEN 3"
+                "     ELSE 4"
+                "   END"
+            ).fetchall()
+
+            logger.info(
+                "server.bulk_reindex_start",
+                count=unindexed_count,
+                folders=[
+                    f"{r[0] or 'NULL'}:{r[1]}" for r in priority_folders
+                ],
+            )
             try:
                 with progress:
                     progress.set_bodies_total(unindexed_count)
-                    await body_indexer.index_unindexed()
+                    for folder_row in priority_folders:
+                        folder = folder_row[0]
+                        await body_indexer.index_unindexed(folder=folder)
             except Exception:
                 logger.warning("server.bulk_reindex_failed", exc_info=True)
             remaining = db.execute(
