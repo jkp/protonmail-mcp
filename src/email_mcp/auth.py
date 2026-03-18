@@ -25,7 +25,7 @@ from email_mcp.config import Settings
 from email_mcp.srp import SRPUser, extract_modulus
 
 _API_BASE = "https://mail.proton.me/api"
-_APP_VERSION = "Other"
+_APP_VERSION = "linux-bridge@3.22.0"
 
 
 def _headers() -> dict[str, str]:
