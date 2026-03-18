@@ -21,6 +21,7 @@ dependencies = [
     "pgpy13>=0.6.1rc1",
     "sqlite-vec>=0.1.7",
     "sentence-transformers>=5.3.0",
+    "einops>=0.8.2",
 ]
 
 [project.scripts]

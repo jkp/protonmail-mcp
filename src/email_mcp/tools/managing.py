@@ -196,7 +196,9 @@ async def archive_thread(
     # A proper implementation would use ConversationID from the ProtonMail API
     base_subject = (subject or "").removeprefix("Re: ").removeprefix("Fwd: ").strip()
     thread_rows = db.execute(
-        "SELECT pm_id, folder FROM messages WHERE (subject = ? OR subject = ? OR subject = ?) AND folder != 'Archive'",
+        "SELECT pm_id, folder FROM messages"
+        " WHERE (subject = ? OR subject = ? OR subject = ?)"
+        " AND folder != 'Archive'",
         [base_subject, f"Re: {base_subject}", f"Fwd: {base_subject}"],
     ).fetchall()
 
@@ -255,6 +257,9 @@ async def sync_now() -> dict[str, Any]:
     unindexed = db.execute(
         "SELECT COUNT(*) FROM messages WHERE body_indexed = 0"
     ).fetchone()[0]
+    decrypt_failed = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE body_indexed = -1"
+    ).fetchone()[0]
 
     last_event = db.sync_state.get("last_event_id")
     initial_done = db.sync_state.get("initial_sync_done") == "1"
@@ -264,6 +269,7 @@ async def sync_now() -> dict[str, Any]:
         "message_count": total,
         "unread_count": unread,
         "bodies_pending_index": unindexed,
+        "bodies_decrypt_failed": decrypt_failed,
         "last_event_id": last_event,
         "initial_sync_done": initial_done,
     }

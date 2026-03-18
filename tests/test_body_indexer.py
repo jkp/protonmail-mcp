@@ -80,7 +80,9 @@ class TestSingleFetch:
         _insert_message(db, "pm-001")
         mock_decryptor.fetch_and_decrypt.side_effect = Exception("decrypt failed")
         await indexer._fetch_and_index("pm-001")  # should not raise
-        assert db.messages.get("pm-001").body_indexed is False
+        # -1 = permanently failed (won't be retried)
+        row = db.execute("SELECT body_indexed FROM messages WHERE pm_id = 'pm-001'").fetchone()
+        assert row[0] == -1
 
     async def test_unknown_pm_id_is_noop(
         self, indexer: BodyIndexer, db: Database, mock_decryptor: MagicMock

@@ -61,9 +61,26 @@ class BodyIndexer:
                 return
             except Exception as e:
                 if delay is None:
-                    logger.warning("body_indexer.fetch_failed", pm_id=pm_id, error=str(e), attempts=attempt + 1)
+                    logger.warning(
+                        "body_indexer.fetch_failed",
+                        pm_id=pm_id,
+                        error=str(e),
+                        attempts=attempt + 1,
+                    )
+                    # Mark as permanently failed (-1) so we don't retry forever
+                    self._db.execute(
+                        "UPDATE messages SET body_indexed = -1"
+                        " WHERE pm_id = ?",
+                        [pm_id],
+                    )
+                    self._db.commit()
                 else:
-                    logger.debug("body_indexer.fetch_retry", pm_id=pm_id, attempt=attempt + 1, retry_in=delay)
+                    logger.debug(
+                        "body_indexer.fetch_retry",
+                        pm_id=pm_id,
+                        attempt=attempt + 1,
+                        retry_in=delay,
+                    )
                     await asyncio.sleep(delay)
 
     # ── Queue worker ──────────────────────────────────────────────────────────
