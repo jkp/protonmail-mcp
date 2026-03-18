@@ -60,31 +60,13 @@ def client(oauth_dir: Path) -> TestClient:
     return TestClient(_make_app(oauth_state_dir=oauth_dir))
 
 
-class TestRegistrationBlocking:
-    """Registration is blocked after first client registers."""
+class TestRegistration:
+    """/register is open — oauth_allowed_users is the real protection."""
 
-    def test_register_blocked_when_clients_exist(
-        self, client: TestClient
-    ) -> None:
+    def test_register_allowed(self, client: TestClient) -> None:
         resp = client.post(
-            "/register", json={"redirect_uris": ["https://evil.com"]}
+            "/register", json={"redirect_uris": ["https://example.com"]}
         )
-        assert resp.status_code == 404
-
-    def test_register_allowed_when_no_clients(self) -> None:
-        """First-time setup: /register works with empty oauth dir."""
-        empty_dir = Path(tempfile.mkdtemp()) / "oauth"
-        empty_dir.mkdir()
-        app = _make_app(oauth_state_dir=empty_dir)
-        c = TestClient(app)
-        resp = c.post("/register", json={"redirect_uris": ["https://ok.com"]})
-        assert resp.status_code == 200
-
-    def test_register_allowed_when_no_oauth_dir(self) -> None:
-        """No oauth_state_dir configured: /register passes through."""
-        app = _make_app(oauth_state_dir=None)
-        c = TestClient(app)
-        resp = c.post("/register", json={})
         assert resp.status_code == 200
 
 

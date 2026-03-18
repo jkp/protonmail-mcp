@@ -47,12 +47,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         return any(self._oauth_state_dir.iterdir())
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
-        path = request.url.path
-
-        # Block /register if a client is already registered.
-        # First-time setup needs it, but after that lock the door.
-        if path == "/register" and self._has_registered_clients():
-            return Response(status_code=404)
+        # Note: /register and /.well-known/ are left open because Claude.ai's
+        # MCP proxy needs them for OAuth setup and reconnections. The real
+        # protection is oauth_allowed_users — registration alone doesn't
+        # grant access.
 
         # Rate limit unauthenticated requests by IP
         if "authorization" not in {k.lower() for k in request.headers.keys()}:
