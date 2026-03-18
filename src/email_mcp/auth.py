@@ -35,16 +35,13 @@ def _headers() -> dict[str, str]:
 def main() -> None:
     settings = Settings()
 
+    # Prompt for everything interactively — env vars are optional
     username = settings.imap_username
-    password = settings.proton_password
-
     if not username:
-        print("ERROR: EMAIL_MCP_IMAP_USERNAME is not set", file=sys.stderr)
-        sys.exit(1)
-
-    # Allow interactive password entry if not in env
+        username = input("ProtonMail username: ").strip()
+    password = settings.proton_password
     if not password:
-        password = getpass.getpass(f"ProtonMail password for {username}: ")
+        password = getpass.getpass("ProtonMail password: ")
 
     print(f"Authenticating as {username} ...", file=sys.stderr)
 
