@@ -224,16 +224,20 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="embedder")
             loop = asyncio.get_event_loop()
             while True:
-                pm_ids = embedder.get_unembedded(limit=200)
+                pm_ids = embedder.get_unembedded(limit=50)
                 if not pm_ids:
                     await asyncio.sleep(30)
                     continue
-                count = await loop.run_in_executor(pool, embedder.embed_batch, pm_ids)
+                count = await loop.run_in_executor(
+                    pool, embedder.embed_batch, pm_ids
+                )
                 logger.info(
                     "server.embed_progress",
                     embedded=count,
                     batch=len(pm_ids),
                 )
+                # Yield to other tasks between batches
+                await asyncio.sleep(1)
 
         background_tasks.append(asyncio.create_task(_embed_bodies(), name="embed_bodies"))
 
