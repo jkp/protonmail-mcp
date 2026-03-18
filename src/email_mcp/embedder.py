@@ -20,7 +20,7 @@ from email_mcp.db import Database
 logger = structlog.get_logger(__name__)
 
 _BATCH_SIZE = 64
-_MAX_BODY_CHARS = 800  # ~400 tokens + header = under 512 token model limit
+_MAX_BODY_CHARS = 1000  # ~500 tokens, fits within 512-token model limit
 
 
 def _serialize_f32(vector: np.ndarray) -> bytes:
@@ -128,13 +128,9 @@ class Embedder:
             if not msg:
                 continue
 
-            text = (
-                f"{_DOC_PREFIX}"
-                f"From: {msg.sender_name or ''}"
-                f" <{msg.sender_email or ''}>\n"
-                f"Subject: {msg.subject or ''}\n\n"
-                f"{body[:_MAX_BODY_CHARS]}"
-            )
+            # Embed body only — sender/subject are already covered by FTS5+LIKE.
+            # Maximises body content within the 512-token model limit.
+            text = f"{_DOC_PREFIX}{body[:_MAX_BODY_CHARS]}"
             texts.append(text)
             valid_ids.append(pm_id)
 
