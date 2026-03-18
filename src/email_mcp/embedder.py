@@ -120,7 +120,8 @@ class Embedder:
 
         rows = self._db.execute(
             "SELECT pm_id, distance FROM message_vectors"
-            " WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            " WHERE embedding MATCH ? AND k = ?"
+            " ORDER BY distance",
             [_serialize_f32(query_vec), limit],
         ).fetchall()
 
@@ -141,20 +142,45 @@ class Embedder:
             params: Parameters for the WHERE clause.
             limit: Max results.
         """
+        # sqlite-vec requires k=? on the vec0 table directly.
+        # Do vector search first (over-fetch), then post-filter with SQL.
         vec = self._model.encode([query], batch_size=1, show_progress_bar=False)
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
-        sql = (
-            "SELECT v.pm_id, v.distance FROM message_vectors v"
-            " JOIN messages m ON m.pm_id = v.pm_id"
-            f" WHERE {where_clause}"
-            " AND v.embedding MATCH ?"
-            " ORDER BY v.distance LIMIT ?"
-        )
-        all_params = [*(params or []), _serialize_f32(query_vec), limit]
+        # Over-fetch to account for filtering
+        k = limit * 5
 
-        rows = self._db.execute(sql, all_params).fetchall()
-        return [r[0] for r in rows]
+        vector_rows = self._db.execute(
+            "SELECT pm_id, distance FROM message_vectors"
+            " WHERE embedding MATCH ? AND k = ?"
+            " ORDER BY distance",
+            [_serialize_f32(query_vec), k],
+        ).fetchall()
+
+        if where_clause == "1" and not params:
+            return [r[0] for r in vector_rows[:limit]]
+
+        # Post-filter with the WHERE clause
+        candidate_ids = [r[0] for r in vector_rows]
+        if not candidate_ids:
+            return []
+
+        placeholders = ",".join("?" * len(candidate_ids))
+        # Use alias 'm' to match caller's where_clause (e.g. "m.folder = ?")
+        sql = (
+            f"SELECT m.pm_id FROM messages m"
+            f" WHERE m.pm_id IN ({placeholders})"
+            f" AND {where_clause}"
+        )
+        filtered = self._db.execute(
+            sql, [*candidate_ids, *(params or [])]
+        ).fetchall()
+        filtered_ids = {r[0] for r in filtered}
+
+        # Preserve vector distance ordering
+        return [
+            r[0] for r in vector_rows if r[0] in filtered_ids
+        ][:limit]
 
     def get_unembedded(self, limit: int = 1000) -> list[str]:
         """Get pm_ids that have bodies but aren't embedded yet.
