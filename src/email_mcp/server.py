@@ -62,7 +62,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     managing._api = api
     batch._api = api
 
-    progress = SyncProgress()
+    progress = SyncProgress(transport=settings.transport)
     event_loop = EventLoop(db=db, api=api)
 
     background_tasks: list[asyncio.Task] = []
@@ -73,8 +73,10 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             await api.get_latest_event_id()
             logger.info("server.api_session_valid")
         except AuthError:
-            logger.warning("server.api_auth_required",
-                           detail="Run 'email-mcp auth' to authenticate with ProtonMail")
+            logger.warning(
+                "server.api_auth_required",
+                detail="Run 'email-mcp auth' to authenticate with ProtonMail",
+            )
         except Exception:
             logger.warning("server.api_check_failed", exc_info=True)
 
@@ -111,8 +113,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             reading._decryptor = decryptor
             logger.info("server.keys_loaded", address_keys=len(addresses))
         except Exception:
-            logger.warning("server.key_load_failed", exc_info=True,
-                           detail="Body decryption unavailable — run 'email-mcp-auth' with 2FA")
+            logger.warning(
+                "server.key_load_failed",
+                exc_info=True,
+                detail="Body decryption unavailable — run 'email-mcp-auth' with 2FA",
+            )
 
         body_indexer = (
             BodyIndexer(db=db, decryptor=decryptor, workers=3, progress=progress)
@@ -162,9 +167,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         )
 
         # 8. Start event loop background task
-        background_tasks.append(
-            asyncio.create_task(event_loop.run(), name="event_loop")
-        )
+        background_tasks.append(asyncio.create_task(event_loop.run(), name="event_loop"))
 
         # 9. Start body indexer worker queue (for ongoing events)
         if body_indexer:
@@ -216,9 +219,7 @@ def _build_auth_storage(s: Settings):
     return FileTreeStore(
         data_directory=state_dir,
         key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(state_dir),
-        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(
-            state_dir
-        ),
+        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(state_dir),
     )
 
 
