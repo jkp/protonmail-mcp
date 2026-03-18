@@ -94,8 +94,12 @@ async def send(
     """
     sender = _resolve_from(from_address)
     logger.info("tool.send", to=to, subject=subject, cc=cc, from_=sender.addr)
-    msg = build_new(sender, to, subject, body, cc)
-    await _sender.send_and_save(msg, settings.maildir_path)
+    try:
+        msg = build_new(sender, to, subject, body, cc)
+        await _sender.send_and_save(msg, settings.maildir_path)
+    except Exception as e:
+        logger.error("tool.send.failed", to=to, error=str(e), exc_info=True)
+        return {"error": f"Send failed: {e}"}
     logger.info("tool.send.done", to=to, subject=subject)
     return {"status": "sent", "to": to, "subject": subject}
 
@@ -124,8 +128,12 @@ async def reply(
     if original is None:
         return {"error": f"Email not found: {message_id}"}
 
-    msg = build_reply(original, body, sender, reply_all)
-    await _sender.send_and_save(msg, settings.maildir_path)
+    try:
+        msg = build_reply(original, body, sender, reply_all)
+        await _sender.send_and_save(msg, settings.maildir_path)
+    except Exception as e:
+        logger.error("tool.reply.failed", message_id=message_id, error=str(e), exc_info=True)
+        return {"error": f"Reply failed: {e}"}
     logger.info("tool.reply.done", message_id=message_id)
     return {"status": "sent", "in_reply_to": message_id}
 
@@ -154,7 +162,11 @@ async def forward(
     if original is None:
         return {"error": f"Email not found: {message_id}"}
 
-    msg = build_forward(original, to, body, sender)
-    await _sender.send_and_save(msg, settings.maildir_path)
+    try:
+        msg = build_forward(original, to, body, sender)
+        await _sender.send_and_save(msg, settings.maildir_path)
+    except Exception as e:
+        logger.error("tool.forward.failed", message_id=message_id, error=str(e), exc_info=True)
+        return {"error": f"Forward failed: {e}"}
     logger.info("tool.forward.done", message_id=message_id, to=to)
     return {"status": "sent", "forwarded_to": to, "original_id": message_id}
