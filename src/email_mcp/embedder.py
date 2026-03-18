@@ -20,7 +20,7 @@ from email_mcp.db import Database
 logger = structlog.get_logger(__name__)
 
 _BATCH_SIZE = 64
-_MAX_BODY_CHARS = 2000
+_MAX_BODY_CHARS = 800  # ~400 tokens + header = under 512 token model limit
 
 
 def _serialize_f32(vector: np.ndarray) -> bytes:
