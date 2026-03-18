@@ -78,6 +78,27 @@ class ProtonDecryptor:
         await asyncio.gather(*[_fetch_one(pid) for pid in pm_ids])
         return results
 
+    async def fetch_attachment(self, att_id: str, key_packets_b64: str) -> bytes:
+        """Fetch and decrypt an attachment by its ProtonMail attachment ID.
+
+        Args:
+            att_id: ProtonMail attachment ID.
+            key_packets_b64: Base64-encoded encrypted session key packets.
+
+        Returns:
+            Decrypted attachment bytes.
+        """
+        encrypted = await self._api.get_attachment(att_id)
+
+        # The attachment is a PGP message encrypted with the session key.
+        # First decrypt the session key from KeyPackets, then use it to
+        # decrypt the attachment body.
+        try:
+            return self._key_ring.decrypt_binary(encrypted)
+        except Exception:
+            logger.warning("decryptor.attachment_decrypt_failed", att_id=att_id)
+            raise
+
     @staticmethod
     def _extract_attachments(msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract attachment metadata from API message response."""
@@ -88,5 +109,6 @@ class ProtonDecryptor:
                 "filename": att.get("Name", ""),
                 "size": att.get("Size", 0),
                 "mime_type": att.get("MIMEType", "application/octet-stream"),
+                "key_packets": att.get("KeyPackets", ""),
             })
         return attachments

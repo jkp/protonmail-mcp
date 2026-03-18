@@ -118,6 +118,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                             logger.debug("server.address_key_skip", email=addr.get("Email"), exc_info=True)
 
             decryptor = ProtonDecryptor(api=api, key_ring=key_ring)
+            reading._decryptor = decryptor
             logger.info("server.keys_loaded", address_keys=len(addresses))
         except Exception:
             logger.warning("server.key_load_failed", exc_info=True,
@@ -201,6 +202,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         managing._api = None
         batch._api = None
         reading._imap = None
+        reading._decryptor = None
         logger.info("server.shutdown")
 
 

@@ -251,6 +251,23 @@ class ProtonClient:
         system = await self._request("GET", "/core/v4/labels", params={"Type": 4})
         return user_labels["Labels"] + system["Labels"]
 
+    # ── Attachments ─────────────────────────────────────────────────────────
+
+    async def get_attachment(self, att_id: str) -> bytes:
+        """GET /mail/v4/attachments/{att_id} → raw encrypted attachment bytes."""
+        response = await self._http.get(
+            f"{self._base_url}/mail/v4/attachments/{att_id}",
+            headers=self._auth_headers(),
+        )
+        if response.status_code == 401:
+            await self._refresh_access_token()
+            response = await self._http.get(
+                f"{self._base_url}/mail/v4/attachments/{att_id}",
+                headers=self._auth_headers(),
+            )
+        response.raise_for_status()
+        return response.content
+
     # ── Mutations ─────────────────────────────────────────────────────────────
 
     async def label_messages(self, pm_ids: list[str], label_id: str) -> None:

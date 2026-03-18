@@ -1,14 +1,15 @@
 """Composing tools: send, reply, forward using stdlib email + aiosmtplib."""
 
-from pathlib import Path
+from email.message import EmailMessage
 from typing import Any
 
 import structlog
 
 from email_mcp.composer import build_forward, build_new, build_reply
+from email_mcp.db import _row_to_message
 from email_mcp.models import Address
 from email_mcp.sender import SmtpSender
-from email_mcp.server import db, mcp, settings, store
+from email_mcp.server import db, mcp, settings
 
 logger = structlog.get_logger()
 
@@ -26,9 +27,40 @@ def _from_address() -> Address:
     return Address(name=settings.from_name, addr=settings.from_address)
 
 
-async def _find_original(message_id: str, folder: str | None = None) -> Path | None:
-    """Find the file path for a message via Maildir fallback."""
-    return store._find_file_by_message_id(message_id, folder)
+def _build_original_email(message_id: str) -> EmailMessage | None:
+    """Build an EmailMessage from SQLite data for reply/forward composition."""
+    row = db.execute(
+        "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
+        [message_id, message_id],
+    ).fetchone()
+    if row is None:
+        return None
+
+    msg_row = _row_to_message(row)
+    body_text = db.bodies.get(msg_row.pm_id) or ""
+
+    # Construct a minimal EmailMessage with headers the composer needs
+    email = EmailMessage()
+    email["From"] = f"{msg_row.sender_name} <{msg_row.sender_email}>" if msg_row.sender_name else msg_row.sender_email
+    to_addrs = ", ".join(
+        f"{r['name']} <{r['email']}>" if r.get("name") else r["email"]
+        for r in msg_row.recipients
+    )
+    email["To"] = to_addrs
+    email["Subject"] = msg_row.subject or ""
+    if msg_row.message_id:
+        email["Message-ID"] = f"<{msg_row.message_id}>"
+    from datetime import datetime, timezone
+    email["Date"] = datetime.fromtimestamp(msg_row.date, tz=timezone.utc).strftime(
+        "%a, %d %b %Y %H:%M:%S %z"
+    )
+    # Strip HTML tags for plain text quoting
+    from email_mcp.convert import html_to_markdown
+    if body_text.strip().startswith("<"):
+        body_text = html_to_markdown(body_text)
+    email.set_content(body_text)
+
+    return email
 
 
 def _resolve_from(from_address: str | None = None) -> Address:
@@ -83,13 +115,9 @@ async def reply(
     sender = _resolve_from(from_address)
     logger.info("tool.reply", message_id=message_id, reply_all=reply_all, from_=sender.addr)
 
-    path = await _find_original(message_id, folder)
-    if path is None:
-        return {"error": f"Email not found: {message_id}"}
-
-    original = store._parse_file(path)
+    original = _build_original_email(message_id)
     if original is None:
-        return {"error": f"Could not parse email: {message_id}"}
+        return {"error": f"Email not found: {message_id}"}
 
     msg = build_reply(original, body, sender, reply_all)
     await _sender.send_and_save(msg, settings.maildir_path)
@@ -117,13 +145,9 @@ async def forward(
     sender = _resolve_from(from_address)
     logger.info("tool.forward", message_id=message_id, to=to, from_=sender.addr)
 
-    path = await _find_original(message_id, folder)
-    if path is None:
-        return {"error": f"Email not found: {message_id}"}
-
-    original = store._parse_file(path)
+    original = _build_original_email(message_id)
     if original is None:
-        return {"error": f"Could not parse email: {message_id}"}
+        return {"error": f"Email not found: {message_id}"}
 
     msg = build_forward(original, to, body, sender)
     await _sender.send_and_save(msg, settings.maildir_path)

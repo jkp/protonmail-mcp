@@ -103,6 +103,54 @@ class ProtonKeyRing:
         key._passphrase = passphrase
         return key
 
+    def decrypt_binary(self, data: bytes) -> bytes:
+        """Decrypt binary PGP data (e.g., attachment content).
+
+        Tries user key first, then address keys.
+        Returns raw decrypted bytes.
+        """
+        msg = pgpy.PGPMessage.from_blob(data)
+
+        for key in [self._user_key] + self._address_keys:
+            try:
+                with key.unlock(key._passphrase):
+                    decrypted = key.decrypt(msg)
+                result = decrypted.message
+                if isinstance(result, str):
+                    return result.encode("utf-8")
+                return bytes(result)
+            except Exception:
+                continue
+
+        raise DecryptionError("No available key could decrypt the data")
+
+    def decrypt_session_key(self, key_packets_b64: str) -> tuple[bytes, pgpy.PGPMessage]:
+        """Decrypt a session key from base64-encoded KeyPackets.
+
+        ProtonMail attachments are encrypted with a session key.
+        The KeyPackets field contains the session key encrypted to the user's public key.
+
+        Returns the decrypted session key info needed for attachment decryption.
+        """
+        key_packets = base64.b64decode(key_packets_b64)
+        msg = pgpy.PGPMessage.from_blob(key_packets)
+
+        for key in [self._user_key] + self._address_keys:
+            try:
+                with key.unlock(key._passphrase):
+                    # Extract the session key by decrypting the key packet
+                    sk = msg._sessionkeys[0]
+                    subkeys = list(key.subkeys.values())
+                    if subkeys:
+                        alg, session_key = sk.decrypt_sk(subkeys[0]._key)
+                    else:
+                        alg, session_key = sk.decrypt_sk(key._key)
+                    return session_key, msg
+            except Exception:
+                continue
+
+        raise DecryptionError("Could not decrypt session key")
+
     @staticmethod
     def _decrypt_with_key(key: pgpy.PGPKey, armored_message: str) -> str:
         """Decrypt an armored PGP message with the given key."""

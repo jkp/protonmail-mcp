@@ -80,16 +80,18 @@ class TestFetchAndDecrypt:
         mock_api.get_message.return_value = _make_message(
             "enc",
             attachments=[
-                {"ID": "att-1", "Name": "doc.pdf", "Size": 1024, "MIMEType": "application/pdf"},
-                {"ID": "att-2", "Name": "img.jpg", "Size": 2048, "MIMEType": "image/jpeg"},
+                {"ID": "att-1", "Name": "doc.pdf", "Size": 1024, "MIMEType": "application/pdf", "KeyPackets": "abc"},
+                {"ID": "att-2", "Name": "img.jpg", "Size": 2048, "MIMEType": "image/jpeg", "KeyPackets": "def"},
             ],
         )
 
         _, atts = await decryptor.fetch_and_decrypt("pm-456")
 
         assert len(atts) == 2
-        assert atts[0] == {"att_id": "att-1", "filename": "doc.pdf", "size": 1024, "mime_type": "application/pdf"}
-        assert atts[1] == {"att_id": "att-2", "filename": "img.jpg", "size": 2048, "mime_type": "image/jpeg"}
+        assert atts[0]["att_id"] == "att-1"
+        assert atts[0]["filename"] == "doc.pdf"
+        assert atts[0]["key_packets"] == "abc"
+        assert atts[1]["att_id"] == "att-2"
 
     async def test_empty_body(self, decryptor, mock_api, mock_key_ring):
         mock_api.get_message.return_value = _make_message("")

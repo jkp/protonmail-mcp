@@ -8,13 +8,15 @@ from typing import Any
 import structlog
 from fastmcp.utilities.types import Image
 
+from email_mcp.decryptor import ProtonDecryptor
 from email_mcp.imap import ImapMutator
 from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
 
-# Module-level ref — set during server lifespan
+# Module-level refs — set during server lifespan
 _imap: ImapMutator | None = None
+_decryptor: ProtonDecryptor | None = None
 
 _TEXT_EXTENSIONS = {
     ".txt", ".csv", ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml", ".log",
@@ -149,15 +151,26 @@ async def download_attachment(
     if att is None:
         return [f"Attachment '{filename}' not found. Run list_attachments first to confirm the filename."]
 
-    if _imap is None:
-        return ["IMAP not connected — attachment download unavailable."]
+    # Try API decryptor first (no Bridge needed), fall back to IMAP
+    content: bytes | None = None
+    if _decryptor and att.get("att_id"):
+        try:
+            content = await _decryptor.fetch_attachment(
+                att["att_id"], att.get("key_packets", "")
+            )
+        except Exception as e:
+            logger.debug("tool.download_attachment.api_failed", error=str(e))
 
-    try:
-        content = await _imap.fetch_attachment(
-            msg.message_id, att["part_num"], folder=msg.folder
-        )
-    except Exception as e:
-        return [f"Failed to fetch attachment: {e}"]
+    if content is None and _imap is not None and att.get("part_num"):
+        try:
+            content = await _imap.fetch_attachment(
+                msg.message_id, att["part_num"], folder=msg.folder
+            )
+        except Exception as e:
+            logger.debug("tool.download_attachment.imap_failed", error=str(e))
+
+    if content is None:
+        return ["Attachment download unavailable — neither API nor IMAP could fetch it."]
 
     size = len(content)
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
