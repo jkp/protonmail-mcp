@@ -87,9 +87,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         timestamps = self._request_counts[client_ip]
 
         # Purge old entries
-        self._request_counts[client_ip] = [
-            t for t in timestamps if now - t < window
-        ]
+        self._request_counts[client_ip] = [t for t in timestamps if now - t < window]
         timestamps = self._request_counts[client_ip]
 
         if len(timestamps) >= self._rate_limit_rpm:

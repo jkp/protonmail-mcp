@@ -8,11 +8,10 @@ from tests.live.conftest import (
     live,
     make_subject,
     poll_for_email,
-    skip_no_maildir,
-    skip_no_smtp,
+    skip_no_api,
 )
 
-pytestmark = [live, skip_no_maildir, skip_no_smtp, pytest.mark.timeout(180)]
+pytestmark = [live, skip_no_api, skip_no_api, pytest.mark.timeout(180)]
 
 SELF_ADDR = "jamie@kirkpatrick.email"
 

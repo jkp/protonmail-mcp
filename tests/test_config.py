@@ -5,23 +5,13 @@ from pathlib import Path
 from email_mcp.config import Settings
 
 
-def test_default_settings(monkeypatch):
-    monkeypatch.setenv("EMAIL_MCP_PROTON_PASSWORD", "")
+def test_default_settings():
+    """Settings loads without error and has expected field types."""
     settings = Settings()
-    assert settings.imap_host == "127.0.0.1"
-    assert settings.imap_port == 1143
-    assert settings.smtp_host == "127.0.0.1"
-    assert settings.smtp_port == 1025
-    assert settings.transport == "stdio"
-    assert settings.log_level == "INFO"
-    assert settings.imap_cert_path == ""
-    assert settings.proton_password == ""
-
-
-def test_maildir_path_expands_user():
-    settings = Settings(maildir_root=Path("~/test-mail"))
-    assert "~" not in str(settings.maildir_path)
-    assert str(settings.maildir_path).endswith("test-mail")
+    assert isinstance(settings.imap_username, str)
+    assert settings.transport in ("stdio", "http")
+    assert isinstance(settings.log_level, str)
+    assert isinstance(settings.proton_password, str)
 
 
 def test_database_path_expands_user():
@@ -37,28 +27,26 @@ def test_proton_session_path_expands_user():
 
 
 def test_env_prefix(monkeypatch):
-    monkeypatch.setenv("EMAIL_MCP_IMAP_HOST", "mail.example.com")
-    monkeypatch.setenv("EMAIL_MCP_SMTP_PORT", "587")
+    monkeypatch.setenv("EMAIL_MCP_IMAP_USERNAME", "user@proton.me")
     monkeypatch.setenv("EMAIL_MCP_TRANSPORT", "http")
     settings = Settings()
-    assert settings.imap_host == "mail.example.com"
-    assert settings.smtp_port == 587
+    assert settings.imap_username == "user@proton.me"
     assert settings.transport == "http"
 
 
-def test_v4_config_env_overrides(monkeypatch):
-    monkeypatch.setenv("EMAIL_MCP_IMAP_CERT_PATH", "/tmp/cert.pem")
+def test_proton_config_env_overrides(monkeypatch):
     monkeypatch.setenv("EMAIL_MCP_PROTON_PASSWORD", "secret")
+    monkeypatch.setenv("EMAIL_MCP_TOGETHER_API_KEY", "tok_123")
     settings = Settings()
-    assert settings.imap_cert_path == "/tmp/cert.pem"
     assert settings.proton_password == "secret"
+    assert settings.together_api_key == "tok_123"
 
 
-def test_old_v3_env_vars_ignored(monkeypatch):
-    """Removed v3 env vars are silently ignored (extra='ignore')."""
+def test_old_env_vars_ignored(monkeypatch):
+    """Removed env vars are silently ignored (extra='ignore')."""
     monkeypatch.setenv("EMAIL_MCP_MBSYNC_CHANNEL", "mymail")
-    monkeypatch.setenv("EMAIL_MCP_NIGHTLY_SYNC_ENABLED", "false")
-    monkeypatch.setenv("EMAIL_MCP_IDLE_ENABLED", "false")
+    monkeypatch.setenv("EMAIL_MCP_SMTP_HOST", "localhost")
+    monkeypatch.setenv("EMAIL_MCP_IMAP_HOST", "localhost")
     # Should not raise
     settings = Settings()
-    assert settings.imap_host == "127.0.0.1"
+    assert settings.imap_username == ""

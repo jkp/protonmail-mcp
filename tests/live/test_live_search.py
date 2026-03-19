@@ -1,21 +1,21 @@
-"""Live search tests: notmuch search, Message-ID resolution, attachments."""
+"""Live search tests: search, Message-ID resolution, attachment pipeline."""
 
 import pytest
 from fastmcp import Client
 
-from tests.live.conftest import _parse_result, live, skip_no_maildir, skip_no_notmuch
+from tests.live.conftest import _parse_result, live, skip_no_api
 
-pytestmark = [live, skip_no_maildir, skip_no_notmuch, pytest.mark.timeout(120)]
+pytestmark = [live, skip_no_api, pytest.mark.timeout(120)]
 
 
 class TestSearch:
     async def test_search_returns_list(self, live_client: Client) -> None:
-        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 5})
+        result = await live_client.call_tool("search", {"query": "in:inbox", "limit": 5})
         data = _parse_result(result)
         assert isinstance(data, list)
 
     async def test_search_result_has_required_fields(self, live_client: Client) -> None:
-        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 5})
+        result = await live_client.call_tool("search", {"query": "in:inbox", "limit": 5})
         data = _parse_result(result)
         if not data:
             pytest.skip("No search results to validate")
@@ -24,7 +24,7 @@ class TestSearch:
             assert "folder" in item
             assert "subject" in item
             assert "date" in item
-            assert "authors" in item
+            assert "from" in item
 
 
 class TestSearchReadBack:
@@ -32,7 +32,7 @@ class TestSearchReadBack:
 
     @pytest.fixture
     async def inbox_search_results(self, live_client: Client) -> list:
-        result = await live_client.call_tool("search", {"query": "tag:inbox", "limit": 10})
+        result = await live_client.call_tool("search", {"query": "in:inbox", "limit": 10})
         data = _parse_result(result)
         if len(data) < 5:
             pytest.skip("Need at least 5 search results for comprehensive test")
@@ -131,36 +131,55 @@ class TestSearchAcrossFolders:
         assert not failures, "Sent read failures:\n" + "\n".join(failures)
 
 
-class TestSearchAttachmentPipeline:
-    """End-to-end: search for attachments -> list -> download."""
+class TestAttachmentPipeline:
+    """End-to-end: search for email with attachment -> list attachments -> download one."""
 
-    async def test_attachment_emails_have_listable_attachments(self, live_client: Client) -> None:
-        result = await live_client.call_tool("search", {"query": "tag:attachment", "limit": 5})
+    @pytest.mark.order(after="tests/live/test_live_write.py::TestSend::test_send_to_self")
+    async def test_search_list_download_attachment(self, live_client: Client) -> None:
+        """Find an email with attachments, list them, download one."""
+        # 1. Search for emails with attachments
+        result = await live_client.call_tool("search", {"query": "has:attachment", "limit": 10})
         data = _parse_result(result)
         if not data:
-            pytest.skip("No emails with attachment tag")
+            pytest.skip("No emails with attachments in database")
 
-        tested = 0
-        failures = []
+        # 2. Find one that has listable attachments
+        target_mid = None
+        target_attachment = None
         for item in data:
             mid = item["message_id"]
-            folder = item.get("folder", "")
-            try:
-                att_result = await live_client.call_tool(
-                    "list_attachments", {"message_id": mid, "folder": folder}
-                )
-                att_data = _parse_result(att_result)
-                if att_data:
-                    for att in att_data:
-                        assert "filename" in att
-                        assert "size" in att
-                        if att["size"] > 0:
-                            tested += 1
-            except Exception as e:
-                failures.append(f"mid={mid} folder={folder}: {e}")
+            att_result = await live_client.call_tool("list_attachments", {"message_id": mid})
+            att_data = _parse_result(att_result)
+            if isinstance(att_data, list) and att_data:
+                # Skip "not yet indexed" notes
+                real_atts = [a for a in att_data if "filename" in a and a.get("size", 0) > 0]
+                if real_atts:
+                    target_mid = mid
+                    target_attachment = real_atts[0]
+                    break
 
-        assert not failures, "Attachment pipeline failures:\n" + "\n".join(failures)
-        assert tested > 0, "No emails with downloadable attachments found"
+        if target_mid is None:
+            pytest.skip("No emails with indexed, downloadable attachments found")
+
+        # 3. Verify attachment metadata
+        assert "filename" in target_attachment
+        assert "size" in target_attachment
+        assert "mime_type" in target_attachment
+        assert target_attachment["size"] > 0
+
+        # 4. Download the attachment
+        dl_result = await live_client.call_tool(
+            "download_attachment",
+            {"message_id": target_mid, "filename": target_attachment["filename"]},
+        )
+        # download_attachment returns list[str | Image]
+        content = dl_result.content
+        assert len(content) > 0, "Download returned empty content"
+        # The first content item should have text (filename, size, or the content itself)
+        first = content[0].text if hasattr(content[0], "text") else str(content[0])
+        assert target_attachment["filename"] in first or len(first) > 10, (
+            f"Download content doesn't look right: {first[:200]}"
+        )
 
 
 class TestGmailStyleQueries:

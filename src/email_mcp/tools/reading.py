@@ -8,8 +8,10 @@ from typing import Any
 import structlog
 from fastmcp.utilities.types import Image
 
+from email_mcp.db import resolve_message
 from email_mcp.decryptor import ProtonDecryptor
 from email_mcp.server import db, mcp
+from email_mcp.tools.listing import _web_url
 
 logger = structlog.get_logger()
 
@@ -35,36 +37,34 @@ def _format_date(unix_ts: int) -> str:
     return datetime.fromtimestamp(unix_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _resolve_message(message_id: str):
-    """Look up a message row by RFC 2822 Message-ID or pm_id."""
-    return db.execute(
-        "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
-        [message_id, message_id],
-    ).fetchone()
-
-
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Read Email"})
-async def read_email(message_id: str, folder: str | None = None) -> dict[str, Any]:
-    """Read a full email message by Message-ID.
+async def read_email(
+    id: int | str | None = None,
+    message_id: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
+    """Read a full email message by id.
 
     Args:
-        message_id: The Message-ID header value (from search or list results)
-        folder: Optional folder hint (unused, kept for API compatibility)
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
+        folder: Optional folder hint (unused)
     """
-    logger.info("tool.read_email", message_id=message_id)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.read_email", id=id)
 
-    row = _resolve_message(message_id)
-    if row is None:
+    msg = resolve_message(db, id)
+    if msg is None:
         return {
             "error": "not_found",
-            "message_id": message_id,
+            "id": id,
             "detail": "Message not found in local database. May not have been synced yet.",
         }
 
     from email_mcp.convert import body_for_display
-    from email_mcp.db import _row_to_message
 
-    msg = _row_to_message(row)
     body = db.bodies.get(msg.pm_id) or ""
 
     # Convert HTML to markdown for efficient LLM consumption
@@ -72,15 +72,14 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
 
     logger.info(
         "tool.read_email.done",
-        pm_id=msg.pm_id,
+        id=msg.row_id,
         subject=msg.subject,
         body_len=len(body),
         body_indexed=msg.body_indexed,
     )
 
     return {
-        "message_id": msg.message_id,
-        "pm_id": msg.pm_id,
+        "id": msg.row_id,
         "from": (
             f"{msg.sender_name} <{msg.sender_email}>" if msg.sender_name else msg.sender_email
         ),
@@ -92,26 +91,31 @@ async def read_email(message_id: str, folder: str | None = None) -> dict[str, An
         "unread": msg.unread,
         "has_attachments": msg.has_attachments,
         "body_indexed": msg.body_indexed,
+        "web_url": _web_url(msg.conversation_id, msg.folder),
     }
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Attachments"})
-async def list_attachments(message_id: str, folder: str | None = None) -> list[dict[str, Any]]:
+async def list_attachments(
+    id: int | str | None = None,
+    message_id: str | None = None,
+    folder: str | None = None,
+) -> list[dict[str, Any]]:
     """List attachments on an email.
 
     Args:
-        message_id: The Message-ID header value
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
         folder: Optional folder hint (unused)
     """
-    logger.info("tool.list_attachments", message_id=message_id)
+    id = id or message_id
+    if id is None:
+        return [{"error": "missing_id", "detail": "Provide id or message_id."}]
+    logger.info("tool.list_attachments", id=id)
 
-    row = _resolve_message(message_id)
-    if row is None:
+    msg = resolve_message(db, id)
+    if msg is None:
         return []
-
-    from email_mcp.db import _row_to_message
-
-    msg = _row_to_message(row)
 
     if not msg.has_attachments:
         return []
@@ -134,8 +138,9 @@ async def list_attachments(message_id: str, folder: str | None = None) -> list[d
     annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Download Attachment"}
 )
 async def download_attachment(
-    message_id: str,
-    filename: str,
+    id: int | str | None = None,
+    message_id: str | None = None,
+    filename: str = "",
     folder: str | None = None,
 ) -> list[str | Image]:
     """Download and return an email attachment.
@@ -147,19 +152,19 @@ async def download_attachment(
     - Other formats: returned as base64-encoded data
 
     Args:
-        message_id: The Message-ID header value
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
         filename: The attachment filename to download
         folder: Optional folder hint (unused)
     """
-    logger.info("tool.download_attachment", message_id=message_id, filename=filename)
+    id = id or message_id
+    if id is None:
+        return ["Error: missing id. Provide id or message_id."]
+    logger.info("tool.download_attachment", id=id, filename=filename)
 
-    row = _resolve_message(message_id)
-    if row is None:
-        return [f"Message not found: {message_id}"]
-
-    from email_mcp.db import _row_to_message
-
-    msg = _row_to_message(row)
+    msg = resolve_message(db, id)
+    if msg is None:
+        return [f"Message not found: {id}"]
 
     att = db.attachments.get(msg.pm_id, filename)
     if att is None:
@@ -196,7 +201,7 @@ async def download_attachment(
             doc = pymupdf.open(str(tmp_path))
             pages = [
                 f"## Page {i + 1}\n\n{page.get_text('text').strip()}"
-                for i, page in enumerate(doc)
+                for i, page in enumerate(doc)  # type: ignore[arg-type]
                 if page.get_text("text").strip()
             ]
             doc.close()

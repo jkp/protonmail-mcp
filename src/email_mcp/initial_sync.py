@@ -52,7 +52,7 @@ class InitialSync:
                 order=label.get("Order"),
             )
         logger.info("initial_sync.labels_done", count=len(labels))
-        return {l["ID"]: {"name": l["Name"], "type": l.get("Type", 1)} for l in labels}
+        return {lbl["ID"]: {"name": lbl["Name"], "type": lbl.get("Type", 1)} for lbl in labels}
 
     async def run(self) -> None:
         """Run the initial sync. No-op if already completed."""
@@ -76,9 +76,7 @@ class InitialSync:
         synced = 0
 
         while True:
-            messages, total = await self._api.get_messages(
-                page=page, page_size=_PAGE_SIZE
-            )
+            messages, total = await self._api.get_messages(page=page, page_size=_PAGE_SIZE)
             if not messages:
                 break
 

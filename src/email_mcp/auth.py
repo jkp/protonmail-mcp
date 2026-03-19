@@ -66,12 +66,15 @@ def main() -> None:
             print("ERROR: SRP safety check failed", file=sys.stderr)
             sys.exit(1)
 
-        auth = client.post("/auth", json={
-            "Username": username,
-            "ClientEphemeral": base64.b64encode(client_ephemeral).decode(),
-            "ClientProof": base64.b64encode(client_proof).decode(),
-            "SRPSession": srp_session,
-        }).json()
+        auth = client.post(
+            "/auth",
+            json={
+                "Username": username,
+                "ClientEphemeral": base64.b64encode(client_ephemeral).decode(),
+                "ClientProof": base64.b64encode(client_proof).decode(),
+                "SRPSession": srp_session,
+            },
+        ).json()
 
         if auth.get("Code") != 1000:
             print(f"ERROR: Authentication failed: {auth.get('Error', auth)}", file=sys.stderr)
@@ -128,8 +131,7 @@ def main() -> None:
                 print(f"Fetched {len(key_salts)} key salts", file=sys.stderr)
             else:
                 print(
-                    f"WARNING: Could not fetch key salts: "
-                    f"{salts_resp.get('Error', salts_resp)}",
+                    f"WARNING: Could not fetch key salts: {salts_resp.get('Error', salts_resp)}",
                     file=sys.stderr,
                 )
         except Exception as e:
@@ -151,14 +153,11 @@ def main() -> None:
                 if key_salt:
                     from email_mcp.crypto import derive_mailbox_passphrase
 
-                    mailbox_passphrase = derive_mailbox_passphrase(
-                        password, key_salt
-                    )
+                    mailbox_passphrase = derive_mailbox_passphrase(password, key_salt)
                     print("Mailbox passphrase derived and cached.", file=sys.stderr)
                 else:
                     print(
-                        "WARNING: No key salt for primary key — "
-                        "using raw password as passphrase.",
+                        "WARNING: No key salt for primary key — using raw password as passphrase.",
                         file=sys.stderr,
                     )
                     mailbox_passphrase = password
@@ -180,7 +179,6 @@ def main() -> None:
     print(f"Session saved to {out_path}", file=sys.stderr)
     if mailbox_passphrase:
         print(
-            "Mailbox passphrase cached in session file. "
-            "PASSWORD IS NO LONGER NEEDED AT RUNTIME.",
+            "Mailbox passphrase cached in session file. PASSWORD IS NO LONGER NEEDED AT RUNTIME.",
             file=sys.stderr,
         )

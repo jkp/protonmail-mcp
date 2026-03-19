@@ -41,7 +41,7 @@ def _insert_message(
 @pytest.fixture
 def mock_decryptor() -> MagicMock:
     dec = MagicMock()
-    dec.fetch_and_decrypt = AsyncMock(return_value=("Hello, this is the email body.", []))
+    dec.fetch_and_decrypt = AsyncMock(return_value=("Hello, this is the email body.", [], None))
     dec.fetch_and_decrypt_batch = AsyncMock(return_value={})
     return dec
 
@@ -97,6 +97,7 @@ class TestSingleFetch:
         mock_decryptor.fetch_and_decrypt.return_value = (
             "body text",
             [{"att_id": "a1", "filename": "doc.pdf", "size": 1024, "mime_type": "application/pdf"}],
+            None,
         )
         await indexer._fetch_and_index("pm-001")
         atts = db.attachments.list_for_message("pm-001")
@@ -132,8 +133,8 @@ class TestBulkIndex:
         _insert_message(db, "pm-001")
         _insert_message(db, "pm-002")
         mock_decryptor.fetch_and_decrypt_batch.return_value = {
-            "pm-001": ("Body 1", []),
-            "pm-002": ("Body 2", []),
+            "pm-001": ("Body 1", [], None),
+            "pm-002": ("Body 2", [], None),
         }
 
         await indexer.index_unindexed()
@@ -149,7 +150,7 @@ class TestBulkIndex:
         _insert_message(db, "pm-001", folder="INBOX")
         _insert_message(db, "pm-002", folder="Archive")
         mock_decryptor.fetch_and_decrypt_batch.return_value = {
-            "pm-001": ("Body 1", []),
+            "pm-001": ("Body 1", [], None),
         }
 
         await indexer.index_unindexed(folder="INBOX")

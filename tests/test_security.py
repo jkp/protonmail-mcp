@@ -1,6 +1,5 @@
 """Tests for security hardening middleware."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -64,18 +63,14 @@ class TestRegistration:
     """/register is open — oauth_allowed_users is the real protection."""
 
     def test_register_allowed(self, client: TestClient) -> None:
-        resp = client.post(
-            "/register", json={"redirect_uris": ["https://example.com"]}
-        )
+        resp = client.post("/register", json={"redirect_uris": ["https://example.com"]})
         assert resp.status_code == 200
 
 
 class TestWellKnownEndpoints:
     """/.well-known/ endpoints pass through (needed for OAuth discovery)."""
 
-    def test_well_known_oauth_server_allowed(
-        self, client: TestClient
-    ) -> None:
+    def test_well_known_oauth_server_allowed(self, client: TestClient) -> None:
         resp = client.get("/.well-known/oauth-authorization-server")
         assert resp.status_code == 200
 
@@ -104,35 +99,25 @@ class TestServerHeaderStripping:
 
 class TestSecurityHeaders:
     def test_x_content_type_options(self, client: TestClient) -> None:
-        resp = client.post(
-            "/mcp", json={}, headers={"Authorization": "Bearer test"}
-        )
+        resp = client.post("/mcp", json={}, headers={"Authorization": "Bearer test"})
         assert resp.headers.get("x-content-type-options") == "nosniff"
 
     def test_x_frame_options(self, client: TestClient) -> None:
-        resp = client.post(
-            "/mcp", json={}, headers={"Authorization": "Bearer test"}
-        )
+        resp = client.post("/mcp", json={}, headers={"Authorization": "Bearer test"})
         assert resp.headers.get("x-frame-options") == "DENY"
 
     def test_referrer_policy(self, client: TestClient) -> None:
-        resp = client.post(
-            "/mcp", json={}, headers={"Authorization": "Bearer test"}
-        )
+        resp = client.post("/mcp", json={}, headers={"Authorization": "Bearer test"})
         assert resp.headers.get("referrer-policy") == "no-referrer"
 
     def test_cache_control(self, client: TestClient) -> None:
-        resp = client.post(
-            "/mcp", json={}, headers={"Authorization": "Bearer test"}
-        )
+        resp = client.post("/mcp", json={}, headers={"Authorization": "Bearer test"})
         assert resp.headers.get("cache-control") == "no-store"
 
 
 class TestAuthErrorMinimisation:
     def test_www_authenticate_stripped(self, client: TestClient) -> None:
-        resp = client.get(
-            "/auth-fail", headers={"Authorization": "Bearer test"}
-        )
+        resp = client.get("/auth-fail", headers={"Authorization": "Bearer test"})
         assert resp.status_code == 401
         www_auth = resp.headers.get("www-authenticate", "")
         assert "error_description" not in www_auth
@@ -149,9 +134,7 @@ class TestRateLimiting:
         resp = c.post("/mcp", json={})
         assert resp.status_code == 429
 
-    def test_authenticated_not_rate_limited(
-        self, oauth_dir: Path
-    ) -> None:
+    def test_authenticated_not_rate_limited(self, oauth_dir: Path) -> None:
         app = _make_app(rate_limit_rpm=3, oauth_state_dir=oauth_dir)
         c = TestClient(app)
         for _ in range(5):

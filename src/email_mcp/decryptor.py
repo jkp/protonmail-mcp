@@ -30,18 +30,22 @@ class ProtonDecryptor:
         self._api = api
         self._key_ring = key_ring
 
-    async def fetch_and_decrypt(self, pm_id: str) -> tuple[str, list[dict[str, Any]]]:
+    async def fetch_and_decrypt(
+        self, pm_id: str
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
         """Fetch a single message and decrypt its body.
 
         Returns:
-            (plaintext_body, attachments) where attachments is a list of
-            {att_id, filename, size, mime_type} dicts.
+            (plaintext_body, attachments, parsed_headers) where attachments is
+            a list of {att_id, filename, size, mime_type} dicts and
+            parsed_headers is the raw ParsedHeaders dict from the API (or None).
         """
         msg = await self._api.get_message(pm_id)
         body = msg.get("Body", "")
+        parsed_headers = msg.get("ParsedHeaders")
 
         if not body:
-            return "", self._extract_attachments(msg)
+            return "", self._extract_attachments(msg), parsed_headers
 
         try:
             plaintext = await asyncio.to_thread(self._key_ring.decrypt, body)
@@ -49,29 +53,63 @@ class ProtonDecryptor:
             logger.warning("decryptor.decrypt_failed", pm_id=pm_id)
             raise
 
-        return plaintext, self._extract_attachments(msg)
+        return plaintext, self._extract_attachments(msg), parsed_headers
+
+    async def fetch_headers(self, pm_id: str) -> dict[str, Any] | None:
+        """Fetch ParsedHeaders only — no body decryption.
+
+        Used for headers-only backfill when bodies are already indexed.
+        """
+        msg = await self._api.get_message(pm_id)
+        return msg.get("ParsedHeaders")
+
+    async def fetch_headers_batch(
+        self,
+        pm_ids: list[str],
+        concurrency: int = 10,
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch ParsedHeaders for multiple messages in parallel.
+
+        Returns:
+            {pm_id: parsed_headers} for successfully fetched messages.
+        """
+        sem = asyncio.Semaphore(concurrency)
+        results: dict[str, dict[str, Any]] = {}
+
+        async def _fetch_one(pm_id: str) -> None:
+            async with sem:
+                try:
+                    headers = await self.fetch_headers(pm_id)
+                    if headers is not None:
+                        results[pm_id] = headers
+                except Exception as e:
+                    logger.warning("decryptor.headers_failed", pm_id=pm_id, error=str(e))
+
+        await asyncio.gather(*[_fetch_one(pid) for pid in pm_ids])
+        return results
 
     async def fetch_and_decrypt_batch(
         self,
         pm_ids: list[str],
         concurrency: int = 10,
-    ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
+    ) -> dict[str, tuple[str, list[dict[str, Any]], dict[str, Any] | None]]:
         """Fetch and decrypt multiple messages in parallel.
 
         Uses asyncio.Semaphore to limit concurrent API calls.
 
         Returns:
-            {pm_id: (plaintext_body, attachments)} for successfully decrypted messages.
+            {pm_id: (plaintext_body, attachments, parsed_headers)} for
+            successfully decrypted messages.
             Failed messages are logged and omitted from results.
         """
         sem = asyncio.Semaphore(concurrency)
-        results: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+        results: dict[str, tuple[str, list[dict[str, Any]], dict[str, Any] | None]] = {}
 
         async def _fetch_one(pm_id: str) -> None:
             async with sem:
                 try:
-                    body, atts = await self.fetch_and_decrypt(pm_id)
-                    results[pm_id] = (body, atts)
+                    body, atts, headers = await self.fetch_and_decrypt(pm_id)
+                    results[pm_id] = (body, atts, headers)
                 except Exception as e:
                     logger.warning("decryptor.batch_failed", pm_id=pm_id, error=str(e))
 
@@ -104,11 +142,13 @@ class ProtonDecryptor:
         """Extract attachment metadata from API message response."""
         attachments = []
         for att in msg.get("Attachments", []):
-            attachments.append({
-                "att_id": att["ID"],
-                "filename": att.get("Name", ""),
-                "size": att.get("Size", 0),
-                "mime_type": att.get("MIMEType", "application/octet-stream"),
-                "key_packets": att.get("KeyPackets", ""),
-            })
+            attachments.append(
+                {
+                    "att_id": att["ID"],
+                    "filename": att.get("Name", ""),
+                    "size": att.get("Size", 0),
+                    "mime_type": att.get("MIMEType", "application/octet-stream"),
+                    "key_packets": att.get("KeyPackets", ""),
+                }
+            )
         return attachments

@@ -33,9 +33,9 @@ def derive_mailbox_passphrase(password: str, key_salt_b64: str) -> str:
     """
     salt = base64.b64decode(key_salt_b64)
     # Encode salt with bcrypt's custom base64 alphabet, strip padding
-    encoded_salt = base64.b64encode(salt).translate(
-        bytes.maketrans(_STD_B64, _BCRYPT_B64)
-    ).rstrip(b"=")
+    encoded_salt = (
+        base64.b64encode(salt).translate(bytes.maketrans(_STD_B64, _BCRYPT_B64)).rstrip(b"=")
+    )
     hashed = bcrypt.hashpw(password.encode("utf-8"), b"$2y$10$" + encoded_salt)
     return hashed.decode("utf-8")[-31:]
 
@@ -58,18 +58,32 @@ class ProtonKeyRing:
         """
         self._user_key = self._load_and_unlock(user_key_armored, passphrase)
         self._address_keys: list[pgpy.PGPKey] = []
+        self._keys_by_email: dict[str, pgpy.PGPKey] = {}
 
-    def add_address_key(self, armored_key: str, encrypted_token: str) -> None:
+    def signing_key_for(self, email: str) -> pgpy.PGPKey:
+        """Return the private key for a specific email address.
+
+        Falls back to the first address key, then user key.
+        """
+        key = self._keys_by_email.get(email.lower())
+        if key:
+            return key
+        return self._address_keys[0] if self._address_keys else self._user_key
+
+    def add_address_key(self, armored_key: str, encrypted_token: str, email: str = "") -> None:
         """Add an address key. The token (passphrase) is encrypted with the user key.
 
         Args:
             armored_key: Armored PGP private key from the address.
             encrypted_token: PGP-encrypted passphrase for unlocking the address key.
+            email: Email address this key belongs to (for signing key lookup).
         """
         # Decrypt the token using the user key to get the address key passphrase
         token_passphrase = self._decrypt_with_key(self._user_key, encrypted_token)
         addr_key = self._load_and_unlock(armored_key, token_passphrase)
         self._address_keys.append(addr_key)
+        if email:
+            self._keys_by_email[email.lower()] = addr_key
 
     def decrypt(self, armored_pgp_message: str) -> str:
         """Decrypt a PGP-encrypted message body.
@@ -113,7 +127,7 @@ class ProtonKeyRing:
 
         for key in [self._user_key] + self._address_keys:
             try:
-                with key.unlock(key._passphrase):
+                with key.unlock(key._passphrase):  # type: ignore[attr-defined]
                     decrypted = key.decrypt(msg)
                 result = decrypted.message
                 if isinstance(result, str):
@@ -137,7 +151,7 @@ class ProtonKeyRing:
 
         for key in [self._user_key] + self._address_keys:
             try:
-                with key.unlock(key._passphrase):
+                with key.unlock(key._passphrase):  # type: ignore[attr-defined]
                     # Extract the session key by decrypting the key packet
                     sk = msg._sessionkeys[0]
                     subkeys = list(key.subkeys.values())
@@ -155,7 +169,7 @@ class ProtonKeyRing:
     def _decrypt_with_key(key: pgpy.PGPKey, armored_message: str) -> str:
         """Decrypt an armored PGP message with the given key."""
         msg = pgpy.PGPMessage.from_blob(armored_message)
-        with key.unlock(key._passphrase):
+        with key.unlock(key._passphrase):  # type: ignore[attr-defined]
             try:
                 decrypted = key.decrypt(msg)
             except Exception as e:

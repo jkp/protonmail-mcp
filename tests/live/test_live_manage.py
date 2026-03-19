@@ -8,11 +8,10 @@ from tests.live.conftest import (
     live,
     make_subject,
     poll_for_email,
-    skip_no_maildir,
-    skip_no_smtp,
+    skip_no_api,
 )
 
-pytestmark = [live, skip_no_maildir, pytest.mark.timeout(600)]
+pytestmark = [live, skip_no_api, pytest.mark.timeout(600)]
 
 SELF_ADDR = "jamie@kirkpatrick.email"
 
@@ -33,7 +32,7 @@ async def _send_and_wait(client: Client, test_name: str) -> dict:
     return email
 
 
-@skip_no_smtp
+@skip_no_api
 class TestArchive:
     async def test_archive_email(self, live_client: Client) -> None:
         email = await _send_and_wait(live_client, "archive")
@@ -44,7 +43,7 @@ class TestArchive:
         assert data["status"] == "archived"
 
 
-@skip_no_smtp
+@skip_no_api
 class TestMoveEmail:
     async def test_move_to_trash(self, live_client: Client) -> None:
         email = await _send_and_wait(live_client, "move")
@@ -60,7 +59,7 @@ class TestMoveEmail:
         assert data["status"] == "moved"
 
 
-@skip_no_smtp
+@skip_no_api
 class TestDelete:
     async def test_delete_email(self, live_client: Client) -> None:
         email = await _send_and_wait(live_client, "delete")

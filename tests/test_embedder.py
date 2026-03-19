@@ -52,13 +52,16 @@ def mock_model():
     model = MagicMock()
 
     def _encode(texts, batch_size=64, show_progress_bar=True):
-        # Return distinct vectors based on text content hash
+        # Return distinct unit-normalized vectors based on text content hash.
+        # Normalized so cosine distances are in [0, 2] as sqlite-vec expects.
         from email_mcp.embedder import _EMBEDDING_DIMS
 
         vecs = []
         for t in texts:
             rng = np.random.RandomState(hash(t) % 2**31)
-            vecs.append(rng.randn(_EMBEDDING_DIMS).astype(np.float32))
+            v = rng.randn(_EMBEDDING_DIMS).astype(np.float32)
+            v /= np.linalg.norm(v)  # unit normalize
+            vecs.append(v)
         return np.array(vecs)
 
     model.encode = _encode
@@ -99,7 +102,11 @@ class TestEmbedBatch:
 
 
 class TestVectorSearch:
-    def test_finds_similar_messages(self, embedder, db):
+    def test_finds_similar_messages(self, embedder, db, monkeypatch):
+        # The mock model returns hash-based random unit vectors, so two
+        # different texts produce ~orthogonal vectors (distance ≈ 1.0).
+        # This test checks search mechanics, not semantic similarity.
+        # No distance threshold to worry about — reranker handles precision.
         _insert_message(
             db,
             "pm-1",

@@ -8,7 +8,9 @@ import structlog
 
 
 def configure_logging(
-    level: str = "INFO", ntfy_url: str = "", ntfy_topic: str = "",
+    level: str = "INFO",
+    ntfy_url: str = "",
+    ntfy_topic: str = "",
     log_file: Path | None = None,
 ) -> None:
     """Configure structlog with JSON rendering.

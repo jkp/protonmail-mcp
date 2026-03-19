@@ -41,6 +41,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     import json
 
     import email_mcp.tools.batch as batch
+    import email_mcp.tools.composing as composing
     import email_mcp.tools.managing as managing
     import email_mcp.tools.reading as reading
     from email_mcp.body_indexer import BodyIndexer
@@ -61,9 +62,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     # 2. Set refs on tools
     managing._api = api
     batch._api = api
+    managing._event_loop = None  # Set after EventLoop is created
 
     progress = SyncProgress(transport=settings.transport)
     event_loop = EventLoop(db=db, api=api)
+    managing._event_loop = event_loop
 
     background_tasks: list[asyncio.Task] = []
 
@@ -111,7 +114,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                     token = ak.get("Token", "")
                     if token:
                         try:
-                            key_ring.add_address_key(ak["PrivateKey"], token)
+                            key_ring.add_address_key(
+                                ak["PrivateKey"], token, email=addr.get("Email", "")
+                            )
                         except Exception:
                             logger.debug(
                                 "server.address_key_skip",
@@ -121,6 +126,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
 
             decryptor = ProtonDecryptor(api=api, key_ring=key_ring)
             reading._decryptor = decryptor
+
+            # Wire up ProtonSender for composing tools
+            from email_mcp.sender import ProtonSender
+
+            composing._sender = ProtonSender(api=api, key_ring=key_ring)
             logger.info("server.keys_loaded", address_keys=len(addresses))
         except Exception:
             logger.warning(
@@ -148,6 +158,40 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 await initial_sync.run()
         except Exception:
             logger.warning("server.initial_sync_failed", exc_info=True)
+
+        # 6c. Metadata re-sync (backfills conversation_id, etc.)
+        if settings.resync_metadata:
+            from email_mcp.event_loop import _event_to_row
+            from email_mcp.proton_api import derive_folder
+
+            async def _resync_metadata() -> None:
+                """Re-sync all message metadata from ProtonMail API."""
+                logger.info("server.resync_metadata.start")
+                label_map = {
+                    lbl["ID"]: {"name": lbl["Name"], "type": lbl.get("Type", 1)}
+                    for lbl in await api.get_labels()
+                }
+                page = 0
+                synced = 0
+                while True:
+                    messages, total = await api.get_messages(page=page, page_size=150)
+                    if not messages:
+                        break
+                    for msg in messages:
+                        pm_id = msg["ID"]
+                        label_ids = msg.get("LabelIDs", [])
+                        folder = derive_folder(label_ids, label_map)
+                        row = _event_to_row(pm_id, msg, folder)
+                        db.messages.upsert(row)
+                    synced += len(messages)
+                    if synced % 1500 == 0 or synced >= total:
+                        logger.info("server.resync_metadata.progress", synced=synced, total=total)
+                    if synced >= total:
+                        break
+                    page += 1
+                logger.info("server.resync_metadata.done", synced=synced)
+
+            background_tasks.append(asyncio.create_task(_resync_metadata(), name="resync_metadata"))
 
         async def _bulk_reindex_bodies() -> None:
             """Background task: index unindexed bodies in priority order.
@@ -214,11 +258,54 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         except Exception:
             logger.warning("server.embedder_load_failed", exc_info=True)
 
+        # 7d. Re-index content (bodies and/or headers in one pass)
+        if (settings.reindex_bodies or settings.reindex_headers) and body_indexer:
+
+            async def _reindex_content() -> None:
+                logger.info(
+                    "server.reindex_content.start",
+                    bodies=settings.reindex_bodies,
+                    headers=settings.reindex_headers,
+                )
+                await body_indexer.reindex_content(
+                    bodies=settings.reindex_bodies,
+                    headers=settings.reindex_headers,
+                )
+                logger.info("server.reindex_content.done")
+
+            background_tasks.append(asyncio.create_task(_reindex_content(), name="reindex_content"))
+
+        # 7e. Reset embeddings if reembed flag is set
+        if settings.reembed and embedder:
+            reset_count = db.execute(
+                "UPDATE messages SET embedded = 0 WHERE embedded != 0"
+            ).rowcount
+            db.commit()
+            logger.info("server.reembed_reset", count=reset_count)
+
+        # 7e. Warm up search models in background (non-blocking)
+        if embedder:
+
+            async def _warmup_models() -> None:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, embedder.warmup)
+
+            background_tasks.append(asyncio.create_task(_warmup_models(), name="warmup_models"))
+
+        # Threshold: if more than this many messages are unembedded, use
+        # Together API for speed. Below this, use local model (free).
+        backfill_threshold = 10
+
         async def _embed_bodies() -> None:
-            """Background task: embed body-indexed messages for vector search."""
+            """Background task: embed body-indexed messages for vector search.
+
+            Uses Together API while working through a large backlog, then
+            switches to local model for ongoing trickle (no API costs).
+            """
             if not embedder:
                 return
             import concurrent.futures
+            from functools import partial
 
             pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="embedder"
@@ -226,17 +313,24 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             loop = asyncio.get_event_loop()
             try:
                 while True:
-                    pm_ids = embedder.get_unembedded(limit=1000)
+                    pm_ids = embedder.get_unembedded(limit=100)
                     if not pm_ids:
                         await asyncio.sleep(30)
                         continue
+                    use_api = len(pm_ids) >= backfill_threshold
+                    logger.info(
+                        "server.embed_starting",
+                        batch=len(pm_ids),
+                        mode="api" if use_api else "local",
+                    )
                     count = await loop.run_in_executor(
-                        pool, embedder.embed_batch, pm_ids
+                        pool, partial(embedder.embed_batch, pm_ids, use_api=use_api)
                     )
                     logger.info(
                         "server.embed_progress",
                         embedded=count,
                         batch=len(pm_ids),
+                        mode="api" if use_api else "local",
                     )
                     await asyncio.sleep(1)
             except asyncio.CancelledError:
@@ -275,8 +369,10 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 pass
 
         managing._api = None
+        managing._event_loop = None
         batch._api = None
         reading._decryptor = None
+        composing._sender = None
         logger.info("server.shutdown")
 
 
@@ -384,8 +480,28 @@ import email_mcp.tools.reading  # noqa: F401, E402
 import email_mcp.tools.searching  # noqa: F401, E402
 
 
+def _build_app():
+    """Build the ASGI app with middleware (used by uvicorn reload mode)."""
+    from email_mcp.security import SecurityMiddleware
+
+    _app = mcp.http_app(transport="http", stateless_http=True)
+    _app.add_middleware(SecurityMiddleware, oauth_state_dir=settings.oauth_state_dir)  # type: ignore[arg-type]
+    return _app
+
+
+# Module-level app for uvicorn --reload (needs importable path)
+app = _build_app() if settings.transport == "http" else None
+
+
 def main() -> None:
     """Entry point for the MCP server."""
+    import faulthandler
+    import signal
+
+    faulthandler.enable()
+    # SIGUSR1 dumps all thread stacks to stderr
+    faulthandler.register(signal.SIGUSR1)
+
     logger.info(
         "server.starting",
         transport=settings.transport,
@@ -399,24 +515,26 @@ def main() -> None:
         if settings.transport == "http":
             import uvicorn
 
-            from email_mcp.security import SecurityMiddleware
-
-            app = mcp.http_app(
-                transport="http",
-                stateless_http=True,
-            )
-            app.add_middleware(
-                SecurityMiddleware,
-                oauth_state_dir=settings.oauth_state_dir,
-            )
-
-            uvicorn.run(
-                app,
-                host=settings.host,
-                port=settings.port,
-                timeout_graceful_shutdown=0,
-                log_level="info",
-            )
+            if settings.reload:
+                # Reload mode: pass import string so uvicorn can re-import on changes
+                uvicorn.run(
+                    "email_mcp.server:app",
+                    host=settings.host,
+                    port=settings.port,
+                    timeout_graceful_shutdown=0,
+                    log_level="info",
+                    reload=True,
+                    reload_dirs=["src"],
+                )
+            else:
+                assert app is not None, "app must be built for http transport"
+                uvicorn.run(
+                    app,
+                    host=settings.host,
+                    port=settings.port,
+                    timeout_graceful_shutdown=0,
+                    log_level="info",
+                )
         else:
             mcp.run(log_level="WARNING")
     except (KeyboardInterrupt, SystemExit):

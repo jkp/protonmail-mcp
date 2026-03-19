@@ -15,15 +15,6 @@ wheels = [
 ]
 
 [[package]]
-name = "aiosmtplib"
-version = "5.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e7/ad/240a7ce4e50713b111dff8b781a898d8d4770e5d6ad4899103f84c86005c/aiosmtplib-5.1.0.tar.gz", hash = "sha256:2504a23b2b63c9de6bc4ea719559a38996dba68f73f6af4eb97be20ee4c5e6c4", size = 66176, upload-time = "2026-01-25T01:51:11.408Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/82/70f2c452acd7ed18c558c8ace9a8cf4fdcc70eae9a41749b5bdc53eb6f45/aiosmtplib-5.1.0-py3-none-any.whl", hash = "sha256:368029440645b486b69db7029208a7a78c6691b90d24a5332ddba35d9109d55b", size = 27778, upload-time = "2026-01-25T01:51:10.026Z" },
-]
-
-[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -507,8 +498,8 @@ name = "email-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiosmtplib" },
     { name = "einops" },
+    { name = "email-reply-parser" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "justhtml" },
@@ -521,6 +512,7 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "sqlite-vec" },
     { name = "structlog" },
+    { name = "tenacity" },
 ]
 
 [package.dev-dependencies]
@@ -536,8 +528,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosmtplib", specifier = ">=3.0" },
     { name = "einops", specifier = ">=0.8.2" },
+    { name = "email-reply-parser", specifier = ">=0.5.12" },
     { name = "fastmcp", specifier = "==3.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "justhtml", specifier = ">=1.12.0" },
@@ -550,6 +542,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=5.3.0" },
     { name = "sqlite-vec", specifier = ">=0.1.7" },
     { name = "structlog", specifier = ">=24.0" },
+    { name = "tenacity", specifier = ">=9.1.4" },
 ]
 
 [package.metadata.requires-dev]
@@ -561,6 +554,15 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "ruff", specifier = ">=0.9" },
     { name = "ty", specifier = ">=0.0.1a1" },
+]
+
+[[package]]
+name = "email-reply-parser"
+version = "0.5.12"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/f9/3fbd22530467a831a0506267477c5005d24661d07abf776678ab42d51b35/email_reply_parser-0.5.12.tar.gz", hash = "sha256:9dbf3eca69990932234f09e7f50aa73756574fc1f88e88c324fec1a741ee6a74", size = 4694, upload-time = "2020-10-07T17:26:34.734Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/8d/11696d31eafc68ceea8108f635d30aefc6df9cb27640949f45aec963d637/email_reply_parser-0.5.12-py3-none-any.whl", hash = "sha256:3499c02284679e020acf8aa30ef9e43c62f9ab5ccee0a35bfac85a0c1fa685fd", size = 4139, upload-time = "2020-10-07T17:26:46.835Z" },
 ]
 
 [[package]]
@@ -2108,6 +2110,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]

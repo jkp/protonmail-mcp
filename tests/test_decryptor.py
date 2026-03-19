@@ -69,12 +69,13 @@ class TestFetchAndDecrypt:
         mock_api.get_message.return_value = _make_message("encrypted body")
         mock_key_ring.decrypt.return_value = "plaintext"
 
-        body, atts = await decryptor.fetch_and_decrypt("pm-123")
+        body, atts, headers = await decryptor.fetch_and_decrypt("pm-123")
 
         mock_api.get_message.assert_called_once_with("pm-123")
         mock_key_ring.decrypt.assert_called_once_with("encrypted body")
         assert body == "plaintext"
         assert atts == []
+        assert headers is None
 
     async def test_extracts_attachments(self, decryptor, mock_api, mock_key_ring):
         mock_api.get_message.return_value = _make_message(
@@ -97,7 +98,7 @@ class TestFetchAndDecrypt:
             ],
         )
 
-        _, atts = await decryptor.fetch_and_decrypt("pm-456")
+        _, atts, _ = await decryptor.fetch_and_decrypt("pm-456")
 
         assert len(atts) == 2
         assert atts[0]["att_id"] == "att-1"
@@ -108,7 +109,7 @@ class TestFetchAndDecrypt:
     async def test_empty_body(self, decryptor, mock_api, mock_key_ring):
         mock_api.get_message.return_value = _make_message("")
 
-        body, _ = await decryptor.fetch_and_decrypt("pm-789")
+        body, _, _ = await decryptor.fetch_and_decrypt("pm-789")
 
         assert body == ""
         mock_key_ring.decrypt.assert_not_called()
@@ -132,7 +133,7 @@ class TestFetchAndDecryptBatch:
         results = await decryptor.fetch_and_decrypt_batch(["a", "b", "c"])
 
         assert len(results) == 3
-        assert all(body == "plain" for body, _ in results.values())
+        assert all(body == "plain" for body, _, _ in results.values())
 
     async def test_batch_skips_failures(self, decryptor, mock_api, mock_key_ring):
         call_count = 0

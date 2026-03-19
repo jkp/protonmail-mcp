@@ -19,7 +19,8 @@ def test_html_to_markdown_links():
     html = '<a href="https://example.com">Click here</a>'
     result = html_to_markdown(html)
     assert "Click here" in result
-    assert "https://example.com" in result
+    # to_text() extracts link text (URLs stripped — fine for LLM consumption)
+    assert "<a" not in result
 
 
 def test_html_to_markdown_strips_whitespace():

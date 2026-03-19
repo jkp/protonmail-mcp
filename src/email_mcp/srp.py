@@ -9,12 +9,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import re
 
 import bcrypt
 
-
 # ── PMHash (4× SHA-512 expansion) ────────────────────────────────────────────
+
 
 class _PMHash:
     digest_size = 256
@@ -40,6 +39,7 @@ def _pmhash(b: bytes = b"") -> _PMHash:
 
 # ── Byte / integer helpers ────────────────────────────────────────────────────
 
+
 def _long_length(n: int) -> int:
     return (n.bit_length() + 7) // 8
 
@@ -60,7 +60,7 @@ def _get_random_of_length(nbytes: int) -> int:
 # ── Password hashing ──────────────────────────────────────────────────────────
 
 _BCRYPT_B64 = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-_STD_B64    = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_STD_B64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 
 def _bcrypt_b64_encode(s: bytes) -> bytes:
@@ -77,6 +77,7 @@ def _hash_password(password: bytes, salt: bytes, modulus: bytes, version: int) -
 
 
 # ── SRP User ──────────────────────────────────────────────────────────────────
+
 
 class SRPUser:
     def __init__(self, password: str, modulus: bytes) -> None:
@@ -107,7 +108,7 @@ class SRPUser:
         return _long_to_bytes(self._A)
 
     def process_challenge(self, salt: bytes, server_ephemeral: bytes, version: int) -> bytes | None:
-        B = _bytes_to_long(server_ephemeral)
+        B = _bytes_to_long(server_ephemeral)  # noqa: N806 — SRP standard notation
         if (B % self._N) == 0:
             return None
 
@@ -121,8 +122,8 @@ class SRPUser:
 
         x = _bytes_to_long(_hash_password(self._password, salt, self._modulus, version))
         v = pow(self._g, x, self._N)
-        S = pow(B - self._k * v, self._a + u * x, self._N)
-        K = _long_to_bytes(S)
+        S = pow(B - self._k * v, self._a + u * x, self._N)  # noqa: N806
+        K = _long_to_bytes(S)  # noqa: N806
 
         # M = PMHash(A || B || K)
         h = _pmhash()
@@ -147,6 +148,7 @@ class SRPUser:
 
 
 # ── Modulus extraction ────────────────────────────────────────────────────────
+
 
 def extract_modulus(pgp_signed_modulus: str) -> bytes:
     """Extract the raw modulus bytes from a PGP-signed modulus string.

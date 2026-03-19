@@ -221,3 +221,93 @@ class TestLabels:
         db.labels.upsert("6", "Archive", type=3)
         assert db.labels.name_for_id("6") == "Archive"
         assert db.labels.name_for_id("missing") is None
+
+
+class TestBulkDiscriminator:
+    """Tests for newsletter_id, parsed_headers, and headers_indexed columns."""
+
+    def _make_row(self, pm_id: str = "pm-001", **kwargs) -> MessageRow:
+        now = int(time.time())
+        return MessageRow(
+            pm_id=pm_id,
+            message_id=f"<{pm_id}@example.com>",
+            subject=kwargs.get("subject", "Test"),
+            sender_name=kwargs.get("sender_name", "Alice"),
+            sender_email=kwargs.get("sender_email", "alice@example.com"),
+            recipients=[],
+            date=now,
+            unread=False,
+            label_ids=["0"],
+            folder="INBOX",
+            size=1024,
+            has_attachments=False,
+            body_indexed=False,
+            newsletter_id=kwargs.get("newsletter_id"),
+        )
+
+    def test_newsletter_id_column_exists(self, db: Database) -> None:
+        cols = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
+        assert "newsletter_id" in cols
+
+    def test_parsed_headers_column_exists(self, db: Database) -> None:
+        cols = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
+        assert "parsed_headers" in cols
+
+    def test_headers_indexed_column_exists(self, db: Database) -> None:
+        cols = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
+        assert "headers_indexed" in cols
+
+    def test_newsletter_id_stored_on_upsert(self, db: Database) -> None:
+        row = self._make_row(newsletter_id="nl-abc123")
+        db.messages.upsert(row)
+        result = db.messages.get("pm-001")
+        assert result.newsletter_id == "nl-abc123"
+
+    def test_newsletter_id_null_by_default(self, db: Database) -> None:
+        row = self._make_row()
+        db.messages.upsert(row)
+        result = db.messages.get("pm-001")
+        assert result.newsletter_id is None
+
+    def test_store_and_retrieve_parsed_headers(self, db: Database) -> None:
+        import json
+
+        db.messages.upsert(self._make_row())
+        headers = {"List-Unsubscribe": "<mailto:unsub@ex.com>", "From": "Alice"}
+        db.execute(
+            "UPDATE messages SET parsed_headers = ?, headers_indexed = 1 WHERE pm_id = ?",
+            [json.dumps(headers), "pm-001"],
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT parsed_headers, headers_indexed FROM messages WHERE pm_id = 'pm-001'"
+        ).fetchone()
+        assert json.loads(row[0]) == headers
+        assert row[1] == 1
+
+    def test_has_list_unsubscribe_via_json_extract(self, db: Database) -> None:
+        """Verify we can query List-Unsubscribe from stored JSON."""
+        import json
+
+        db.messages.upsert(self._make_row("pm-promo", newsletter_id="nl-1"))
+        db.messages.upsert(self._make_row("pm-real"))
+
+        # Store headers for promo
+        db.execute(
+            "UPDATE messages SET parsed_headers = ?, headers_indexed = 1 WHERE pm_id = ?",
+            [json.dumps({"List-Unsubscribe": "<mailto:unsub@ex.com>"}), "pm-promo"],
+        )
+        # Store headers for real (no List-Unsubscribe)
+        db.execute(
+            "UPDATE messages SET parsed_headers = ?, headers_indexed = 1 WHERE pm_id = ?",
+            [json.dumps({"From": "alice@ex.com"}), "pm-real"],
+        )
+        db.commit()
+
+        # Query: non-bulk only
+        rows = db.execute(
+            """SELECT pm_id FROM messages
+               WHERE json_extract(parsed_headers, '$."List-Unsubscribe"') IS NULL
+                 AND newsletter_id IS NULL"""
+        ).fetchall()
+        assert [r[0] for r in rows] == ["pm-real"]

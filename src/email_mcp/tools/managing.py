@@ -8,21 +8,23 @@ from typing import Any
 
 import structlog
 
+from email_mcp.db import resolve_message
 from email_mcp.proton_api import ProtonAPIError, ProtonClient
 from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
 
-# Module-level ref — set during server lifespan
+# Module-level refs — set during server lifespan
 _api: ProtonClient | None = None
+_event_loop: Any = None  # EventLoop instance for triggering manual sync
 
 # ProtonMail system label IDs
 _FOLDER_TO_LABEL: dict[str, str] = {
-    "INBOX":   "0",
-    "Drafts":  "1",
-    "Sent":    "2",
-    "Trash":   "3",
-    "Spam":    "4",
+    "INBOX": "0",
+    "Drafts": "1",
+    "Sent": "2",
+    "Trash": "3",
+    "Spam": "4",
     "Archive": "6",
 }
 
@@ -33,13 +35,10 @@ def _require_api() -> ProtonClient:
     return _api
 
 
-def _resolve_pm_id(message_id: str) -> str | None:
-    """Look up pm_id by RFC 2822 Message-ID or pm_id directly."""
-    row = db.execute(
-        "SELECT pm_id FROM messages WHERE message_id = ? OR pm_id = ?",
-        [message_id, message_id],
-    ).fetchone()
-    return row[0] if row else None
+def _resolve_pm_id(identifier: int | str) -> str | None:
+    """Resolve any identifier (numeric id, message_id, pm_id) to a pm_id."""
+    msg = resolve_message(db, identifier)
+    return msg.pm_id if msg else None
 
 
 def _optimistic_update_folder(pm_id: str, folder: str) -> None:
@@ -61,17 +60,25 @@ def _optimistic_update_read(pm_id: str, unread: bool) -> None:
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Archive Email"})
-async def archive(message_id: str, folder: str | None = None) -> dict[str, Any]:
+async def archive(
+    id: int | str | None = None,
+    message_id: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
     """Archive an email by moving it to the Archive folder.
 
     Args:
-        message_id: The Message-ID (or pm_id) of the email to archive
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
         folder: Ignored in v4 — folder is derived from SQLite
     """
-    logger.info("tool.archive", message_id=message_id)
-    pm_id = _resolve_pm_id(message_id)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.archive", id=id)
+    pm_id = _resolve_pm_id(id)
     if pm_id is None:
-        return {"error": "not_found", "message_id": message_id}
+        return {"error": "not_found", "id": id}
 
     api = _require_api()
     try:
@@ -82,21 +89,29 @@ async def archive(message_id: str, folder: str | None = None) -> dict[str, Any]:
 
     _optimistic_update_folder(pm_id, "Archive")
     logger.info("tool.archive.done", pm_id=pm_id)
-    return {"status": "archived", "message_id": message_id, "pm_id": pm_id}
+    return {"status": "archived", "id": id}
 
 
 @mcp.tool(annotations={"destructiveHint": True, "title": "Delete Email"})
-async def delete(message_id: str, folder: str | None = None) -> dict[str, Any]:
+async def delete(
+    id: int | str | None = None,
+    message_id: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
     """Delete an email by moving it to Trash.
 
     Args:
-        message_id: The Message-ID (or pm_id) of the email to delete
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
         folder: Ignored in v4
     """
-    logger.info("tool.delete", message_id=message_id)
-    pm_id = _resolve_pm_id(message_id)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.delete", id=id)
+    pm_id = _resolve_pm_id(id)
     if pm_id is None:
-        return {"error": "not_found", "message_id": message_id}
+        return {"error": "not_found", "id": id}
 
     api = _require_api()
     try:
@@ -107,32 +122,42 @@ async def delete(message_id: str, folder: str | None = None) -> dict[str, Any]:
 
     _optimistic_update_folder(pm_id, "Trash")
     logger.info("tool.delete.done", pm_id=pm_id)
-    return {"status": "deleted", "message_id": message_id, "pm_id": pm_id}
+    return {"status": "deleted", "id": id}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Move Email"})
 async def move_email(
-    message_id: str, to_folder: str, from_folder: str | None = None
+    id: int | str | None = None,
+    to_folder: str = "",
+    message_id: str | None = None,
+    from_folder: str | None = None,
 ) -> dict[str, Any]:
     """Move an email to a different folder.
 
     Supported folders: INBOX, Archive, Trash, Spam, Sent, Drafts
 
     Args:
-        message_id: The Message-ID (or pm_id) of the email to move
+        id: Numeric message id (from search or list results)
         to_folder: Destination folder name
+        message_id: Legacy message_id or pm_id string (use id instead)
         from_folder: Ignored in v4
     """
-    logger.info("tool.move_email", message_id=message_id, to_folder=to_folder)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.move_email", id=id, to_folder=to_folder)
 
     label_id = _FOLDER_TO_LABEL.get(to_folder)
     if label_id is None:
-        return {"error": "unknown_folder", "folder": to_folder,
-                "valid_folders": list(_FOLDER_TO_LABEL.keys())}
+        return {
+            "error": "unknown_folder",
+            "folder": to_folder,
+            "valid_folders": list(_FOLDER_TO_LABEL.keys()),
+        }
 
-    pm_id = _resolve_pm_id(message_id)
+    pm_id = _resolve_pm_id(id)
     if pm_id is None:
-        return {"error": "not_found", "message_id": message_id}
+        return {"error": "not_found", "id": id}
 
     api = _require_api()
     try:
@@ -143,20 +168,27 @@ async def move_email(
 
     _optimistic_update_folder(pm_id, to_folder)
     logger.info("tool.move_email.done", pm_id=pm_id, to_folder=to_folder)
-    return {"status": "moved", "message_id": message_id, "pm_id": pm_id, "to_folder": to_folder}
+    return {"status": "moved", "id": id, "to_folder": to_folder}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Mark Email Read"})
-async def mark_read(message_id: str) -> dict[str, Any]:
+async def mark_read(
+    id: int | str | None = None,
+    message_id: str | None = None,
+) -> dict[str, Any]:
     """Mark an email as read.
 
     Args:
-        message_id: The Message-ID (or pm_id) of the email
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
     """
-    logger.info("tool.mark_read", message_id=message_id)
-    pm_id = _resolve_pm_id(message_id)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.mark_read", id=id)
+    pm_id = _resolve_pm_id(id)
     if pm_id is None:
-        return {"error": "not_found", "message_id": message_id}
+        return {"error": "not_found", "id": id}
 
     api = _require_api()
     try:
@@ -165,30 +197,33 @@ async def mark_read(message_id: str) -> dict[str, Any]:
         return {"error": "api_error", "detail": str(e)}
 
     _optimistic_update_read(pm_id, unread=False)
-    return {"status": "ok", "message_id": message_id, "pm_id": pm_id}
+    return {"status": "ok", "id": id}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Archive Thread"})
 async def archive_thread(
-    message_id: str,
+    id: int | str | None = None,
+    message_id: str | None = None,
     mark_as_read: bool = True,
 ) -> dict[str, Any]:
     """Archive an email thread. Looks up all messages sharing the same
     conversation by subject prefix and archives them via the ProtonMail API.
 
     Args:
-        message_id: The Message-ID (or pm_id) of any email in the thread
+        id: Numeric message id (from search or list results)
+        message_id: Legacy message_id or pm_id string (use id instead)
         mark_as_read: Mark all messages as read before archiving (default: True)
     """
-    logger.info("tool.archive_thread", message_id=message_id)
+    id = id or message_id
+    if id is None:
+        return {"error": "missing_id", "detail": "Provide id or message_id."}
+    logger.info("tool.archive_thread", id=id)
 
     # Find the anchor message
-    row = db.execute(
-        "SELECT pm_id, subject, folder FROM messages WHERE message_id = ? OR pm_id = ?",
-        [message_id, message_id],
-    ).fetchone()
-    if row is None:
-        return {"error": f"Message not found: {message_id}"}
+    msg = resolve_message(db, id)
+    if msg is None:
+        return {"error": f"Message not found: {id}"}
+    row = (msg.pm_id, msg.subject, msg.folder)
 
     anchor_pm_id, subject, anchor_folder = row[0], row[1], row[2]
 
@@ -241,12 +276,21 @@ async def archive_thread(
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Sync Now"})
 async def sync_now() -> dict[str, Any]:
-    """Report current sync state from the local SQLite database.
+    """Trigger an immediate event poll and report sync state.
 
-    In v4, sync is event-driven (ProtonMail event loop). This tool returns
-    current database statistics rather than triggering a manual sync.
+    Polls the ProtonMail event stream for new messages, then returns
+    current database statistics.
     """
     logger.info("tool.sync_now")
+
+    # Trigger an immediate event poll if event loop is available
+    synced = False
+    if _event_loop is not None:
+        try:
+            await _event_loop.poll_once()
+            synced = True
+        except Exception:
+            logger.warning("tool.sync_now.poll_failed", exc_info=True)
 
     row = db.execute(
         "SELECT COUNT(*), SUM(CASE WHEN unread=1 THEN 1 ELSE 0 END) FROM messages"
@@ -254,18 +298,17 @@ async def sync_now() -> dict[str, Any]:
     total = row[0] or 0
     unread = row[1] or 0
 
-    unindexed = db.execute(
-        "SELECT COUNT(*) FROM messages WHERE body_indexed = 0"
-    ).fetchone()[0]
-    decrypt_failed = db.execute(
-        "SELECT COUNT(*) FROM messages WHERE body_indexed = -1"
-    ).fetchone()[0]
+    unindexed = db.execute("SELECT COUNT(*) FROM messages WHERE body_indexed = 0").fetchone()[0]
+    decrypt_failed = db.execute("SELECT COUNT(*) FROM messages WHERE body_indexed = -1").fetchone()[
+        0
+    ]
 
     last_event = db.sync_state.get("last_event_id")
     initial_done = db.sync_state.get("initial_sync_done") == "1"
 
     return {
         "status": "ok",
+        "synced": synced,
         "message_count": total,
         "unread_count": unread,
         "bodies_pending_index": unindexed,

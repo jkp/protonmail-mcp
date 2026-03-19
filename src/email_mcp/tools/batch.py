@@ -9,10 +9,11 @@ from typing import Any
 
 import structlog
 
-from email_mcp.db import _row_to_message
+from email_mcp.db import resolve_message
 from email_mcp.proton_api import ProtonAPIError, ProtonClient
 from email_mcp.query_builder import build_query
 from email_mcp.server import db, mcp
+from email_mcp.tools.listing import _web_url
 
 logger = structlog.get_logger()
 
@@ -32,22 +33,19 @@ def _require_api() -> ProtonClient:
     return _api
 
 
-def _lookup_pm_ids(message_ids: list[str]) -> tuple[list[str], list[str]]:
-    """Map RFC 2822 Message-IDs or pm_ids → pm_ids via SQLite.
+def _lookup_pm_ids(ids: list[int | str]) -> tuple[list[str], list[int | str]]:
+    """Map numeric ids, message_ids, or pm_ids → pm_ids via SQLite.
 
-    Returns (found_pm_ids, not_found_message_ids).
+    Returns (found_pm_ids, not_found_ids).
     """
     found: list[str] = []
-    not_found: list[str] = []
-    for mid in message_ids:
-        row = db.execute(
-            "SELECT pm_id FROM messages WHERE message_id = ? OR pm_id = ?",
-            [mid, mid],
-        ).fetchone()
-        if row:
-            found.append(row[0])
+    not_found: list[int | str] = []
+    for identifier in ids:
+        msg = resolve_message(db, identifier)
+        if msg:
+            found.append(msg.pm_id)
         else:
-            not_found.append(mid)
+            not_found.append(identifier)
     return found, not_found
 
 
@@ -111,39 +109,41 @@ def _optimistic_mark_read(pm_ids: list[str]) -> None:
 @mcp.tool(
     annotations={"readOnlyHint": True, "destructiveHint": False, "title": "Batch Read Emails"}
 )
-async def batch_read(message_ids: list[str], folder: str | None = None) -> list[dict[str, Any]]:
+async def batch_read(
+    ids: list[int | str] | None = None,
+    message_ids: list[str] | None = None,
+    folder: str | None = None,
+) -> list[dict[str, Any]]:
     """Read multiple emails in one call.
 
     Returns a list of email dicts (same shape as read_email), with
-    {"error": ..., "message_id": ...} entries for any that couldn't be found.
+    {"error": ..., "id": ...} entries for any that couldn't be found.
 
     Args:
-        message_ids: List of Message-ID header values (or pm_ids) to read
+        ids: List of numeric message ids (or legacy message_id/pm_id strings)
+        message_ids: Legacy alias for ids (use ids instead)
         folder: Ignored in v4
     """
-    logger.info("tool.batch_read", count=len(message_ids))
-    if not message_ids:
+    resolved_ids: list[int | str] = list(ids) if ids else list(message_ids) if message_ids else []
+    ids = resolved_ids
+    logger.info("tool.batch_read", count=len(ids))
+    if not ids:
         return []
 
-    async def _read_one(message_id: str) -> dict[str, Any]:
-        row = db.execute(
-            "SELECT * FROM messages WHERE message_id = ? OR pm_id = ?",
-            [message_id, message_id],
-        ).fetchone()
-        if row is None:
+    async def _read_one(identifier: int | str) -> dict[str, Any]:
+        msg = resolve_message(db, identifier)
+        if msg is None:
             return {
                 "error": "not_found",
-                "message_id": message_id,
+                "id": identifier,
                 "detail": "Message not found in local database.",
             }
         from email_mcp.convert import body_for_display
 
-        msg = _row_to_message(row)
         body = db.bodies.get(msg.pm_id) or ""
         body = body_for_display(body)
         return {
-            "message_id": msg.message_id,
-            "pm_id": msg.pm_id,
+            "id": msg.row_id,
             "from": f"{msg.sender_name} <{msg.sender_email}>"
             if msg.sender_name
             else msg.sender_email,
@@ -154,9 +154,10 @@ async def batch_read(message_ids: list[str], folder: str | None = None) -> list[
             "folder": msg.folder,
             "unread": msg.unread,
             "has_attachments": msg.has_attachments,
+            "web_url": _web_url(msg.conversation_id, msg.folder),
         }
 
-    results = await asyncio.gather(*[_read_one(mid) for mid in message_ids])
+    results = await asyncio.gather(*[_read_one(i) for i in ids])
     logger.info("tool.batch_read.done", count=len(results))
     return list(results)
 
@@ -165,83 +166,107 @@ async def batch_read(message_ids: list[str], folder: str | None = None) -> list[
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Batch Archive Emails"})
-async def batch_archive(message_ids: list[str], folder: str = "INBOX") -> dict[str, Any]:
-    """Archive multiple emails by Message-ID.
+async def batch_archive(
+    ids: list[int | str] | None = None,
+    message_ids: list[str] | None = None,
+    folder: str = "INBOX",
+) -> dict[str, Any]:
+    """Archive multiple emails by id.
 
     For bulk operations (e.g. archiving all newsletters), prefer
     search_and_archive which takes a query instead of requiring listing IDs.
 
     Args:
-        message_ids: List of Message-ID header values (or pm_ids) to archive
+        ids: List of numeric message ids (or legacy message_id/pm_id strings)
+        message_ids: Legacy alias for ids (use ids instead)
         folder: Ignored in v4
     """
-    logger.info("tool.batch_archive", count=len(message_ids))
-    message_ids = message_ids[:_MAX_BATCH_SIZE]
-    pm_ids, not_found = _lookup_pm_ids(message_ids)
+    resolved_ids: list[int | str] = list(ids) if ids else list(message_ids) if message_ids else []
+    ids = resolved_ids
+    logger.info("tool.batch_archive", count=len(ids))
+    ids = ids[:_MAX_BATCH_SIZE]
+    pm_ids, not_found = _lookup_pm_ids(ids)
 
     succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "6")
     _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Archive")
 
-    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
-    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
+    errors: list[dict[str, str | int]] = [
+        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
+    ]
+    errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_archive.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Batch Mark Read"})
-async def batch_mark_read(message_ids: list[str], folder: str | None = None) -> dict[str, Any]:
-    """Mark multiple emails as read by Message-ID.
+async def batch_mark_read(
+    ids: list[int | str] | None = None,
+    message_ids: list[str] | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
+    """Mark multiple emails as read by id.
 
     For bulk operations prefer search_and_mark_read which takes a query.
 
     Args:
-        message_ids: List of Message-ID header values (or pm_ids) to mark as read
+        ids: List of numeric message ids (or legacy message_id/pm_id strings)
+        message_ids: Legacy alias for ids (use ids instead)
         folder: Ignored in v4
     """
-    logger.info("tool.batch_mark_read", count=len(message_ids))
-    message_ids = message_ids[:_MAX_BATCH_SIZE]
-    pm_ids, not_found = _lookup_pm_ids(message_ids)
+    resolved_ids: list[int | str] = list(ids) if ids else list(message_ids) if message_ids else []
+    ids = resolved_ids
+    logger.info("tool.batch_mark_read", count=len(ids))
+    ids = ids[:_MAX_BATCH_SIZE]
+    pm_ids, not_found = _lookup_pm_ids(ids)
 
     succeeded, failed_pm_ids = await _api_mark_read_chunks(pm_ids)
     _optimistic_mark_read([p for p in pm_ids if p not in failed_pm_ids])
 
-    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
-    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
+    errors: list[dict[str, str | int]] = [
+        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
+    ]
+    errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_mark_read.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 
 
 @mcp.tool(annotations={"destructiveHint": True, "title": "Batch Delete Emails"})
 async def batch_delete(
-    message_ids: list[str],
+    ids: list[int | str] | None = None,
+    message_ids: list[str] | None = None,
     confirm: bool = False,
     folder: str | None = None,
 ) -> dict[str, Any]:
-    """Delete multiple emails by Message-ID (moves to Trash).
+    """Delete multiple emails by id (moves to Trash).
 
     For bulk operations prefer search_and_delete which takes a query.
     Requires confirm=True to execute.
 
     Args:
-        message_ids: List of Message-ID header values (or pm_ids) to delete
+        ids: List of numeric message ids (or legacy message_id/pm_id strings)
+        message_ids: Legacy alias for ids (use ids instead)
         confirm: Must be True to proceed with deletion
         folder: Ignored in v4
     """
-    logger.info("tool.batch_delete", count=len(message_ids), confirm=confirm)
+    resolved_ids: list[int | str] = list(ids) if ids else list(message_ids) if message_ids else []
+    ids = resolved_ids
+    logger.info("tool.batch_delete", count=len(ids), confirm=confirm)
     if not confirm:
         return {
             "error": "confirmation_required",
             "detail": "Set confirm=True to delete these messages.",
         }
 
-    message_ids = message_ids[:_MAX_BATCH_SIZE]
-    pm_ids, not_found = _lookup_pm_ids(message_ids)
+    ids = ids[:_MAX_BATCH_SIZE]
+    pm_ids, not_found = _lookup_pm_ids(ids)
 
     succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "3")
     _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Trash")
 
-    errors = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
-    errors += [{"message_id": m, "error": "not_found"} for m in not_found]
+    errors: list[dict[str, str | int]] = [
+        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
+    ]
+    errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_delete.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
 

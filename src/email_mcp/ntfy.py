@@ -85,9 +85,7 @@ class NtfyProcessor:
     rules: dict[str, NotifyRule] = field(default_factory=lambda: NOTIFICATION_RULES)
     _last_sent: dict[str, float] = field(default_factory=dict)
 
-    def __call__(
-        self, logger: Any, method_name: str, event_dict: dict[str, Any]
-    ) -> dict[str, Any]:
+    def __call__(self, logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
         event = event_dict.get("event", "")
         rule = self.rules.get(event)
         if rule is None:

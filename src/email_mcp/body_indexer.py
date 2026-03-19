@@ -1,19 +1,21 @@
-"""Background body indexer for v4 architecture.
+"""Background content indexer for v4 architecture.
 
-Fetches encrypted message bodies from the ProtonMail API, decrypts them
-via ProtonDecryptor, and indexes plaintext into SQLite FTS5.
+Fetches message content from the ProtonMail API — one get_message() call per
+message, extracting whatever is needed:
+
+  - Body: decrypt via ProtonDecryptor, index plaintext into SQLite FTS5
+  - Headers: store ParsedHeaders JSON for bulk email detection
+  - Attachments: store attachment metadata
 
 Two modes:
-  1. Queue-driven (ongoing): consumes pm_ids from an asyncio.Queue,
-     fetches and decrypts each body via the API.
-
-  2. Bulk (initial sync / catchup): queries DB for all unindexed pm_ids,
-     fetches and decrypts in parallel batches.
+  1. Queue-driven (ongoing): consumes pm_ids from an asyncio.Queue.
+  2. Bulk (initial sync / catchup): queries DB for all unindexed pm_ids.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import structlog
@@ -27,7 +29,7 @@ _BATCH_SIZE = 200
 
 
 class BodyIndexer:
-    """Fetches and indexes message bodies into SQLite FTS5."""
+    """Fetches and indexes message content into SQLite."""
 
     retry_delays: list[int] = [5, 15, 60]  # seconds between retries
 
@@ -42,7 +44,7 @@ class BodyIndexer:
     # ── Single message ────────────────────────────────────────────────────────
 
     async def _fetch_and_index(self, pm_id: str) -> None:
-        """Fetch body for one pm_id and index it. Safe to call redundantly."""
+        """Fetch content for one pm_id and index it. Safe to call redundantly."""
         row = self._db.messages.get(pm_id)
         if row is None:
             return
@@ -52,10 +54,12 @@ class BodyIndexer:
         delays = self.retry_delays
         for attempt, delay in enumerate(delays + [None]):
             try:
-                body, attachments = await self._decryptor.fetch_and_decrypt(pm_id)
+                body, attachments, parsed_headers = await self._decryptor.fetch_and_decrypt(pm_id)
                 self._db.bodies.insert(pm_id, body)
                 if attachments:
                     self._db.attachments.upsert_for_message(pm_id, attachments)
+                if parsed_headers is not None:
+                    self._store_headers(pm_id, parsed_headers)
                 self._db.messages.mark_body_indexed(pm_id)
                 if self._progress:
                     self._progress.advance_bodies()
@@ -140,10 +144,12 @@ class BodyIndexer:
             batch = pm_ids[i : i + _BATCH_SIZE]
             results = await self._decryptor.fetch_and_decrypt_batch(batch)
 
-            for pm_id, (body, attachments) in results.items():
+            for pm_id, (body, attachments, parsed_headers) in results.items():
                 self._db.bodies.insert(pm_id, body)
                 if attachments:
                     self._db.attachments.upsert_for_message(pm_id, attachments)
+                if parsed_headers is not None:
+                    self._store_headers(pm_id, parsed_headers)
                 self._db.messages.mark_body_indexed(pm_id)
                 indexed += 1
                 if self._progress:
@@ -153,8 +159,7 @@ class BodyIndexer:
             failed_ids = set(batch) - set(results.keys())
             for pm_id in failed_ids:
                 self._db.execute(
-                    "UPDATE messages SET body_indexed = -1"
-                    " WHERE pm_id = ?",
+                    "UPDATE messages SET body_indexed = -1 WHERE pm_id = ?",
                     [pm_id],
                 )
             if failed_ids:
@@ -164,6 +169,94 @@ class BodyIndexer:
         logger.info(
             "body_indexer.index_unindexed.done",
             folder=folder,
+            indexed=indexed,
+            failed=failed,
+            total=len(pm_ids),
+        )
+
+    # ── Content re-index ──────────────────────────────────────────────────────
+
+    def _store_headers(self, pm_id: str, parsed_headers: dict[str, Any]) -> None:
+        """Store ParsedHeaders JSON and mark headers_indexed."""
+        self._db.execute(
+            "UPDATE messages SET parsed_headers = ?, headers_indexed = 1 WHERE pm_id = ?",
+            [json.dumps(parsed_headers), pm_id],
+        )
+        self._db.commit()
+
+    async def reindex_content(self, *, bodies: bool = False, headers: bool = False) -> None:
+        """Re-index content for messages that need it.
+
+        One get_message() call per message — extracts bodies, headers, or both.
+        Skips work that's already done unless the corresponding flag is set.
+
+        Args:
+            bodies: Re-index bodies (decrypt + store).
+            headers: Re-index headers (store ParsedHeaders JSON).
+        """
+        if not bodies and not headers:
+            return
+
+        # Find messages that need work
+        conditions = []
+        if bodies:
+            conditions.append("body_indexed = 0")
+        if headers:
+            conditions.append("headers_indexed = 0")
+        where = " OR ".join(conditions)
+
+        rows = self._db.execute(
+            f"SELECT pm_id, body_indexed, headers_indexed FROM messages WHERE {where}"
+        ).fetchall()
+
+        if not rows:
+            logger.info("body_indexer.reindex_content.empty", bodies=bodies, headers=headers)
+            return
+
+        logger.info(
+            "body_indexer.reindex_content.start",
+            count=len(rows),
+            bodies=bodies,
+            headers=headers,
+        )
+        indexed = 0
+        failed = 0
+
+        pm_ids = [r[0] for r in rows]
+        # Track what each message needs
+        needs_body = {r[0] for r in rows if bodies and r[1] == 0}
+        needs_headers = {r[0] for r in rows if headers and r[2] == 0}
+
+        for i in range(0, len(pm_ids), _BATCH_SIZE):
+            batch = pm_ids[i : i + _BATCH_SIZE]
+
+            # Messages needing body decryption go through full fetch_and_decrypt
+            batch_need_body = [pid for pid in batch if pid in needs_body]
+            batch_headers_only = [pid for pid in batch if pid not in needs_body]
+
+            # Full decrypt for messages needing bodies (also gets headers)
+            if batch_need_body:
+                results = await self._decryptor.fetch_and_decrypt_batch(batch_need_body)
+                for pm_id, (body, attachments, parsed_headers) in results.items():
+                    self._db.bodies.insert(pm_id, body)
+                    if attachments:
+                        self._db.attachments.upsert_for_message(pm_id, attachments)
+                    if parsed_headers is not None and pm_id in needs_headers:
+                        self._store_headers(pm_id, parsed_headers)
+                    self._db.messages.mark_body_indexed(pm_id)
+                    indexed += 1
+                failed += len(batch_need_body) - len(results)
+
+            # Headers-only for messages that already have bodies
+            if batch_headers_only:
+                results = await self._decryptor.fetch_headers_batch(batch_headers_only)
+                for pm_id, hdrs in results.items():
+                    self._store_headers(pm_id, hdrs)
+                    indexed += 1
+                failed += len(batch_headers_only) - len(results)
+
+        logger.info(
+            "body_indexer.reindex_content.done",
             indexed=indexed,
             failed=failed,
             total=len(pm_ids),

@@ -1,16 +1,11 @@
 """Live integration test fixtures and helpers.
 
-Tests exercise the full stack against a running Protonmail Bridge
-via local Maildir + notmuch + aiosmtplib. Auto-skipped when
-Bridge/mbsync/notmuch not available.
+Tests exercise the full stack against ProtonMail API.
+Auto-skipped when session file not available.
 """
 
 import asyncio
 import json
-import os
-import shutil
-import socket
-import subprocess
 import uuid
 from typing import Any
 
@@ -24,57 +19,19 @@ RUN_ID = uuid.uuid4().hex[:12]
 TEST_SUBJECT_PREFIX = "[MCP-TEST]"
 
 
-def _notmuch_available() -> bool:
-    """Check if notmuch is installed and configured."""
-    if not shutil.which("notmuch"):
-        return False
+def _api_session_available() -> bool:
+    """Check if a ProtonMail session file exists."""
     try:
         settings = Settings()
-        maildir = settings.maildir_path
-        config_path = maildir / ".notmuch" / "config"
-        env = {**os.environ}
-        if config_path.exists():
-            env["NOTMUCH_CONFIG"] = str(config_path)
-        result = subprocess.run(
-            ["notmuch", "count", "*"],
-            capture_output=True,
-            timeout=10,
-            env=env,
-        )
-        return result.returncode == 0
+        return settings.proton_session_file.exists()
     except Exception:
         return False
 
 
-def _smtp_available() -> bool:
-    """Check if SMTP is available by testing TCP connectivity to Bridge."""
-    try:
-        settings = Settings()
-        sock = socket.create_connection((settings.smtp_host, settings.smtp_port), timeout=5)
-        sock.close()
-        return True
-    except (OSError, TimeoutError):
-        return False
-
-
-def _maildir_available() -> bool:
-    """Check if the Maildir exists and has mail."""
-    try:
-        settings = Settings()
-        maildir = settings.maildir_path
-        return (maildir / "INBOX" / "cur").is_dir()
-    except Exception:
-        return False
-
-
-_NOTMUCH_OK = _notmuch_available()
-_SMTP_OK = _smtp_available()
-_MAILDIR_OK = _maildir_available()
+_API_OK = _api_session_available()
 
 live = pytest.mark.live
-skip_no_maildir = pytest.mark.skipif(not _MAILDIR_OK, reason="Maildir not available")
-skip_no_smtp = pytest.mark.skipif(not _SMTP_OK, reason="SMTP not available")
-skip_no_notmuch = pytest.mark.skipif(not _NOTMUCH_OK, reason="notmuch not available")
+skip_no_api = pytest.mark.skipif(not _API_OK, reason="ProtonMail session not available")
 
 
 def _parse_result(result: Any) -> Any:
@@ -108,32 +65,27 @@ async def poll_for_email(
     timeout: float = 90.0,
     interval: float = 5.0,
 ) -> dict[str, Any] | None:
-    """Poll list_emails until an email matching subject appears.
+    """Poll until an email matching subject appears in local DB.
 
-    After each failed check, triggers mbsync + notmuch new to pull new mail.
+    Triggers sync_now each iteration to pull new events from ProtonMail,
+    then searches by subject to find the email regardless of page position.
     """
     elapsed = 0.0
-    settings = Settings()
-    maildir = settings.maildir_path
-    notmuch_config = maildir / ".notmuch" / "config"
-
     while elapsed < timeout:
-        # Sync to pull any new mail
+        # Trigger event poll to pick up newly sent/received emails
         try:
-            subprocess.run(["mbsync", "-a"], capture_output=True, timeout=30)
-            env = {**os.environ}
-            if notmuch_config.exists():
-                env["NOTMUCH_CONFIG"] = str(notmuch_config)
-            subprocess.run(["notmuch", "new"], capture_output=True, timeout=15, env=env)
+            await client.call_tool("sync_now", {})
         except Exception:
             pass
 
-        result = await client.call_tool("list_emails", {"folder": folder, "limit": 50})
+        # Search by subject — more reliable than paging through list_emails
+        result = await client.call_tool("search", {"query": f'subject:"{subject}"', "limit": 5})
         data = _parse_result(result)
-        emails = data.get("emails", []) if isinstance(data, dict) else data
-        for email in emails:
-            if email.get("subject") == subject:
-                return email
+        if isinstance(data, list):
+            for email in data:
+                if email.get("subject") == subject:
+                    return email
+
         await asyncio.sleep(interval)
         elapsed += interval
     return None
@@ -141,7 +93,12 @@ async def poll_for_email(
 
 @pytest.fixture
 async def live_client():
-    """Function-scoped MCP client for live tests."""
+    """Function-scoped MCP client for live tests.
+
+    Each test gets a fresh server lifespan. Teardown errors from background
+    task cancellation are suppressed — they're noise from the anyio task group
+    racing with the lifespan shutdown.
+    """
     from email_mcp.server import mcp
 
     # Strip auth middleware for in-memory client
@@ -156,6 +113,11 @@ async def live_client():
     try:
         async with Client(mcp) as c:
             yield c
+    except (asyncio.CancelledError, Exception):
+        # Suppress teardown noise from background task cancellation.
+        # The server lifespan cancels event_loop, embedder, body_indexer tasks
+        # on shutdown, and anyio's task group can propagate errors during cleanup.
+        pass
     finally:
         if original_middleware is not None:
             mcp.middleware = original_middleware

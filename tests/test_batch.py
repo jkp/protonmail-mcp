@@ -61,24 +61,24 @@ class TestBatchRead:
     async def test_reads_multiple_emails(self, db):
         from email_mcp.tools.batch import batch_read
 
-        result = await batch_read(message_ids=["<msg1@example.com>", "<msg2@example.com>"])
+        result = await batch_read(ids=["<msg1@example.com>", "<msg2@example.com>"])
         assert len(result) == 2
-        assert result[0]["message_id"] == "<msg1@example.com>"
-        assert result[1]["message_id"] == "<msg2@example.com>"
+        assert "id" in result[0]
+        assert "id" in result[1]
 
     async def test_includes_error_for_not_found(self, db):
         from email_mcp.tools.batch import batch_read
 
-        result = await batch_read(message_ids=["<msg1@example.com>", "<missing@example.com>"])
+        result = await batch_read(ids=["<msg1@example.com>", "<missing@example.com>"])
         assert len(result) == 2
-        assert result[0]["message_id"] == "<msg1@example.com>"
+        assert "id" in result[0]
         assert "error" in result[1]
-        assert result[1]["message_id"] == "<missing@example.com>"
+        assert result[1]["id"] == "<missing@example.com>"
 
     async def test_empty_list_returns_empty(self):
         from email_mcp.tools.batch import batch_read
 
-        result = await batch_read(message_ids=[])
+        result = await batch_read(ids=[])
         assert result == []
 
 
@@ -86,7 +86,7 @@ class TestBatchArchive:
     async def test_archives_by_pm_id_lookup(self, mock_api):
         from email_mcp.tools.batch import batch_archive
 
-        result = await batch_archive(message_ids=["<msg1@example.com>", "<msg2@example.com>"])
+        result = await batch_archive(ids=["<msg1@example.com>", "<msg2@example.com>"])
         mock_api.label_messages.assert_awaited_once_with(["pm-001", "pm-002"], "6")
         assert result["status"] == "completed"
         assert result["succeeded"] == 2
@@ -94,23 +94,23 @@ class TestBatchArchive:
     async def test_updates_sqlite_optimistically(self, db):
         from email_mcp.tools.batch import batch_archive
 
-        await batch_archive(message_ids=["<msg1@example.com>"])
+        await batch_archive(ids=["<msg1@example.com>"])
         assert db.messages.get("pm-001").folder == "Archive"
 
     async def test_not_found_reported_in_errors(self, mock_api):
         from email_mcp.tools.batch import batch_archive
 
-        result = await batch_archive(message_ids=["<msg1@example.com>", "<missing@example.com>"])
+        result = await batch_archive(ids=["<msg1@example.com>", "<missing@example.com>"])
         assert result["succeeded"] == 1
         assert result["failed"] == 1
-        assert any(e.get("message_id") == "<missing@example.com>" for e in result["errors"])
+        assert any(e.get("id") == "<missing@example.com>" for e in result["errors"])
 
 
 class TestBatchMarkRead:
     async def test_marks_read_via_api(self, mock_api):
         from email_mcp.tools.batch import batch_mark_read
 
-        result = await batch_mark_read(message_ids=["<msg1@example.com>", "<msg2@example.com>"])
+        result = await batch_mark_read(ids=["<msg1@example.com>", "<msg2@example.com>"])
         mock_api.mark_read.assert_awaited_once_with(["pm-001", "pm-002"])
         assert result["status"] == "completed"
         assert result["succeeded"] == 2
@@ -118,7 +118,7 @@ class TestBatchMarkRead:
     async def test_updates_sqlite_unread_flag(self, db):
         from email_mcp.tools.batch import batch_mark_read
 
-        await batch_mark_read(message_ids=["<msg1@example.com>"])
+        await batch_mark_read(ids=["<msg1@example.com>"])
         assert db.messages.get("pm-001").unread is False
 
 
@@ -126,13 +126,13 @@ class TestBatchDelete:
     async def test_requires_confirm(self):
         from email_mcp.tools.batch import batch_delete
 
-        result = await batch_delete(message_ids=["<msg1@example.com>"], confirm=False)
+        result = await batch_delete(ids=["<msg1@example.com>"], confirm=False)
         assert "error" in result
 
     async def test_deletes_when_confirmed(self, mock_api):
         from email_mcp.tools.batch import batch_delete
 
-        result = await batch_delete(message_ids=["<msg1@example.com>"], confirm=True)
+        result = await batch_delete(ids=["<msg1@example.com>"], confirm=True)
         mock_api.label_messages.assert_awaited_once_with(["pm-001"], "3")
         assert result["status"] == "completed"
         assert result["succeeded"] == 1
@@ -140,7 +140,7 @@ class TestBatchDelete:
     async def test_updates_sqlite_to_trash(self, db):
         from email_mcp.tools.batch import batch_delete
 
-        await batch_delete(message_ids=["<msg1@example.com>"], confirm=True)
+        await batch_delete(ids=["<msg1@example.com>"], confirm=True)
         assert db.messages.get("pm-001").folder == "Trash"
 
 

@@ -32,7 +32,7 @@ _API_BASE = "https://mail.proton.me/api"
 # Both "real" and "aggregate" sent/drafts labels map to the same IMAP folder in Bridge
 # 0=Inbox, 1=AllDrafts→Drafts, 2=AllSent→Sent, 3=Trash, 4=Spam, 6=Archive,
 # 7=Sent, 8=Drafts, 9=Outbox, 16=Snoozed
-# Excluded (virtual/no matching IMAP folder): 5=AllMail, 10=Starred, 12=AllScheduled, 15=AllMail(alt)
+# Excluded (virtual/no IMAP folder): 5=AllMail, 10=Starred, 12=AllScheduled, 15=AllMail(alt)
 _SYSTEM_LABELS: dict[str, str] = {
     "0": "INBOX",
     "1": "Drafts",
@@ -48,6 +48,7 @@ _SYSTEM_LABELS: dict[str, str] = {
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
+
 
 class ProtonAPIError(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -66,6 +67,7 @@ class AuthError(Exception):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def derive_folder(
     label_ids: list[str],
@@ -102,6 +104,7 @@ def derive_folder(
 
 # ── Client ────────────────────────────────────────────────────────────────────
 
+
 class ProtonClient:
     """Async ProtonMail API client.
 
@@ -136,11 +139,15 @@ class ProtonClient:
 
     def _save_session(self) -> None:
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
-        self._session_path.write_text(json.dumps({
-            "access_token": self._access_token,
-            "refresh_token": self._refresh_token,
-            "uid": self._uid,
-        }))
+        self._session_path.write_text(
+            json.dumps(
+                {
+                    "access_token": self._access_token,
+                    "refresh_token": self._refresh_token,
+                    "uid": self._uid,
+                }
+            )
+        )
 
     # ── Low-level HTTP ────────────────────────────────────────────────────────
 
@@ -190,8 +197,12 @@ class ProtonClient:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self._base_url}/auth/refresh",
-                json={"ResponseType": "token", "GrantType": "refresh_token",
-                      "RefreshToken": self._refresh_token, "RedirectURI": ""},
+                json={
+                    "ResponseType": "token",
+                    "GrantType": "refresh_token",
+                    "RefreshToken": self._refresh_token,
+                    "RedirectURI": "",
+                },
                 headers={"x-pm-uid": self._uid, "x-pm-appversion": "Other"},
                 timeout=30.0,
             )
@@ -253,20 +264,77 @@ class ProtonClient:
 
     # ── Attachments ─────────────────────────────────────────────────────────
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Return standard authentication headers for raw HTTP requests."""
+        headers: dict[str, str] = {"x-pm-appversion": "Other"}
+        if self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+        if self._uid:
+            headers["x-pm-uid"] = self._uid
+        return headers
+
     async def get_attachment(self, att_id: str) -> bytes:
         """GET /mail/v4/attachments/{att_id} → raw encrypted attachment bytes."""
-        response = await self._http.get(
-            f"{self._base_url}/mail/v4/attachments/{att_id}",
-            headers=self._auth_headers(),
-        )
-        if response.status_code == 401:
-            await self._refresh_access_token()
-            response = await self._http.get(
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
                 f"{self._base_url}/mail/v4/attachments/{att_id}",
                 headers=self._auth_headers(),
+                timeout=30.0,
             )
+            if response.status_code == 401:
+                await self._refresh_access_token()
+                response = await client.get(
+                    f"{self._base_url}/mail/v4/attachments/{att_id}",
+                    headers=self._auth_headers(),
+                    timeout=30.0,
+                )
         response.raise_for_status()
         return response.content
+
+    async def upload_attachment(
+        self,
+        message_id: str,
+        filename: str,
+        mime_type: str,
+        key_packets: bytes,
+        data_packet: bytes,
+        signature: bytes,
+    ) -> dict[str, Any]:
+        """POST /mail/v4/attachments — upload encrypted attachment to a draft."""
+
+        upload_data = {
+            "MessageID": message_id,
+            "Filename": filename,
+            "MIMEType": mime_type,
+            "Disposition": "attachment",
+            "ContentID": "",
+        }
+        upload_files = {
+            "KeyPackets": ("blob", key_packets, "application/octet-stream"),
+            "DataPacket": ("blob", data_packet, "application/octet-stream"),
+            "Signature": ("blob", signature, "application/octet-stream"),
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._base_url}/mail/v4/attachments",
+                headers=self._auth_headers(),
+                data=upload_data,
+                files=upload_files,
+                timeout=60.0,
+            )
+            if response.status_code == 401:
+                await self._refresh_access_token()
+                response = await client.post(
+                    f"{self._base_url}/mail/v4/attachments",
+                    headers=self._auth_headers(),
+                    data=upload_data,
+                    files=upload_files,
+                    timeout=60.0,
+                )
+        data = response.json()
+        if data.get("Code", 0) != 1000:
+            raise ProtonAPIError(data.get("Code", 0), data.get("Error", "upload failed"))
+        return data.get("Attachment", {})
 
     # ── Mutations ─────────────────────────────────────────────────────────────
 

@@ -4,17 +4,37 @@ from typing import Any
 
 import structlog
 
+from email_mcp.config import Settings
 from email_mcp.server import db, mcp
 
 logger = structlog.get_logger()
 
+_settings = Settings()
 
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Emails"}
-)
+_FOLDER_URL_MAP = {
+    "INBOX": "inbox",
+    "Sent": "sent",
+    "Archive": "archive",
+    "Trash": "trash",
+    "Drafts": "drafts",
+    "Spam": "spam",
+}
+
+
+def _web_url(conversation_id: str, folder: str | None) -> str | None:
+    """Build a ProtonMail web UI URL for a conversation."""
+    if not conversation_id:
+        return None
+    folder_slug = _FOLDER_URL_MAP.get(folder or "", "all-mail")
+    return (
+        f"https://mail.proton.me/u/{_settings.proton_account_index}/{folder_slug}/{conversation_id}"
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Emails"})
 async def list_emails(
     folder: str = "INBOX",
-    limit: int = 20,
+    limit: int = 500,
     offset: int = 0,
 ) -> dict[str, Any]:
     """List email summaries from a folder, sorted newest first.
@@ -22,12 +42,13 @@ async def list_emails(
     Use this to browse a folder (INBOX, Sent, Archive, etc.) without searching.
     Use search() when you need full-text or filtered queries.
 
-    Returns a dict with total count and pagination info so you know if more
-    pages are available.
+    Each summary is ~200 bytes (no bodies), so requesting hundreds is fine.
+    Default returns up to 500 — enough to see an entire inbox without
+    pagination. Use a smaller limit only if you need a quick glance.
 
     Args:
         folder: Mail folder to list (default: INBOX)
-        limit: Maximum number of emails to return
+        limit: Max emails to return (default 500 — summaries are lightweight)
         offset: Number of emails to skip
     """
     logger.info("tool.list_emails", folder=folder, limit=limit, offset=offset)
@@ -44,8 +65,7 @@ async def list_emails(
         "count": len(rows),
         "emails": [
             {
-                "message_id": r.message_id,
-                "pm_id": r.pm_id,
+                "id": r.row_id,
                 "from": f"{r.sender_name} <{r.sender_email}>" if r.sender_name else r.sender_email,
                 "to": r.recipients,
                 "subject": r.subject,
@@ -53,15 +73,14 @@ async def list_emails(
                 "folder": r.folder,
                 "unread": bool(r.unread),
                 "has_attachments": bool(r.has_attachments),
+                "web_url": _web_url(r.conversation_id, r.folder),
             }
             for r in rows
         ],
     }
 
 
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Folders"}
-)
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "title": "List Folders"})
 async def list_folders() -> list[dict[str, Any]]:
     """List all mail folders with message counts."""
     logger.info("tool.list_folders")

@@ -89,6 +89,70 @@ class TestInitialSetup:
         assert "Archive" in names
 
 
+class TestEventToRow:
+    def test_extracts_newsletter_id(self) -> None:
+        from email_mcp.event_loop import _event_to_row
+
+        msg = {
+            "Subject": "Weekly deals",
+            "Sender": {"Name": "Shop", "Address": "shop@example.com"},
+            "ToList": [],
+            "CCList": [],
+            "BCCList": [],
+            "Time": 1000,
+            "Unread": 0,
+            "LabelIDs": ["0"],
+            "Size": 512,
+            "NumAttachments": 0,
+            "ExternalID": "<1@ex.com>",
+            "ConversationID": "conv-1",
+            "NewsletterSubscriptionID": "nl-abc123",
+        }
+        row = _event_to_row("pm-001", msg, "INBOX")
+        assert row.newsletter_id == "nl-abc123"
+
+    def test_newsletter_id_none_when_absent(self) -> None:
+        from email_mcp.event_loop import _event_to_row
+
+        msg = {
+            "Subject": "Personal email",
+            "Sender": {"Name": "Alice", "Address": "alice@example.com"},
+            "ToList": [],
+            "CCList": [],
+            "BCCList": [],
+            "Time": 1000,
+            "Unread": 0,
+            "LabelIDs": ["0"],
+            "Size": 512,
+            "NumAttachments": 0,
+            "ExternalID": "<2@ex.com>",
+            "ConversationID": "conv-2",
+        }
+        row = _event_to_row("pm-002", msg, "INBOX")
+        assert row.newsletter_id is None
+
+    def test_newsletter_id_none_when_empty_string(self) -> None:
+        from email_mcp.event_loop import _event_to_row
+
+        msg = {
+            "Subject": "Test",
+            "Sender": {"Name": "A", "Address": "a@ex.com"},
+            "ToList": [],
+            "CCList": [],
+            "BCCList": [],
+            "Time": 1000,
+            "Unread": 0,
+            "LabelIDs": ["0"],
+            "Size": 512,
+            "NumAttachments": 0,
+            "ExternalID": "<3@ex.com>",
+            "ConversationID": "conv-3",
+            "NewsletterSubscriptionID": "",
+        }
+        row = _event_to_row("pm-003", msg, "INBOX")
+        assert row.newsletter_id is None
+
+
 class TestMessageCreate:
     async def test_create_inserts_message(self, loop: EventLoop, db: Database) -> None:
         event = _make_message_event("pm-001", action=1)

@@ -7,54 +7,46 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="EMAIL_MCP_", env_file=".env", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_prefix="EMAIL_MCP_", env_file=".env", extra="ignore")
 
-    # Bridge IMAP (for body fetching only — decrypts PGP transparently)
-    imap_host: str = "127.0.0.1"
-    imap_port: int = 1143
+    # ProtonMail account email address
     imap_username: str = ""
-    imap_password: str = ""
-    imap_starttls: bool = True
-    imap_cert_path: str = ""
-
-    # SMTP (for sending)
-    smtp_host: str = "127.0.0.1"
-    smtp_port: int = 1025
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_starttls: bool = False
-    smtp_cert_path: str = ""
 
     # Identity
     from_name: str = ""
     from_address: str = ""
 
-    # Maildir (kept for composing reply/forward originals via Bridge)
-    maildir_root: Path = Path("~/.local/share/email-mcp/mail")
-
-    @property
-    def maildir_path(self) -> Path:
-        return self.maildir_root.expanduser().resolve()
-
-    # v4 SQLite database
+    # SQLite database
     db_path: Path = Path("~/.local/share/email-mcp/email.db")
 
     @property
     def database_path(self) -> Path:
         return self.db_path.expanduser().resolve()
 
-    # v4 ProtonMail native API
-    # imap_username is the ProtonMail email address (used for both Bridge IMAP and API)
-    # proton_password: actual ProtonMail account password (for SRP auth)
-    # imap_password: Bridge-generated app password (for IMAP body fetching only)
+    # ProtonMail API (password only needed for initial auth, then cached in session)
     proton_password: str = ""
     proton_session_path: Path = Path("~/.local/share/email-mcp/proton_session.json")
 
     @property
     def proton_session_file(self) -> Path:
         return self.proton_session_path.expanduser().resolve()
+
+    # ProtonMail web UI account index (for generating web URLs)
+    proton_account_index: int = 0
+
+    # Set to True to re-sync all message metadata on next startup
+    # (backfills conversation_id, folder changes, etc. without re-indexing bodies)
+    resync_metadata: bool = False
+
+    # Set to True to re-embed all messages on next startup
+    # (needed after changing what's included in embeddings)
+    reembed: bool = False
+
+    # Re-index content: bodies, headers, or both. One API call per message.
+    # bodies=True re-decrypts unindexed bodies; headers=True backfills
+    # ParsedHeaders for bulk email detection. Both can run together.
+    reindex_bodies: bool = False
+    reindex_headers: bool = False
 
     # NTFY push notifications (empty URL = disabled)
     ntfy_url: str = ""
@@ -65,6 +57,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 10143
     log_level: str = "INFO"
+    reload: bool = False
 
     # Embedding API (optional — local model used as fallback)
     together_api_key: str = ""

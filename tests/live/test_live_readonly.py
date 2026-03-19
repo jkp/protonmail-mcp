@@ -3,9 +3,9 @@
 import pytest
 from fastmcp import Client
 
-from tests.live.conftest import _parse_emails, _parse_result, live, skip_no_maildir
+from tests.live.conftest import _parse_emails, _parse_result, live, skip_no_api
 
-pytestmark = [live, skip_no_maildir, pytest.mark.timeout(120)]
+pytestmark = [live, skip_no_api, pytest.mark.timeout(120)]
 
 
 class TestListFolders:

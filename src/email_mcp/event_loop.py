@@ -15,7 +15,6 @@ Action values from ProtonMail API:
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 import structlog
@@ -44,7 +43,7 @@ class EventLoop:
         self._api = api
         self._poll_interval = poll_interval
         self._running = False
-        self._body_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+        self._body_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1000)
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -84,6 +83,8 @@ class EventLoop:
         if not last_id:
             await self.initialise()
             last_id = self._db.sync_state.get("last_event_id")
+
+        assert last_id is not None, "last_event_id must be set after initialise()"
 
         while True:
             data = await self._api.get_events(last_id)
@@ -128,7 +129,7 @@ class EventLoop:
         elif action in (_ACTION_UPDATE, _ACTION_UPDATE_FLAGS):
             existing = self._db.messages.get(pm_id)
             if existing:
-                self._db.messages.update_folder(pm_id, folder or existing.folder, label_ids)
+                self._db.messages.update_folder(pm_id, folder or existing.folder or "", label_ids)
                 # Also update unread flag
                 self._db.execute(
                     "UPDATE messages SET unread = ?, updated_at = unixepoch() WHERE pm_id = ?",
@@ -213,11 +214,12 @@ class EventLoop:
             logger.warning("event_loop.body_queue_full", pm_id=pm_id)
 
     @property
-    def body_queue(self) -> asyncio.Queue[str]:
+    def body_queue(self) -> asyncio.Queue[str | None]:
         return self._body_queue
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _event_to_row(pm_id: str, msg: dict[str, Any], folder: str | None) -> MessageRow:
     sender = msg.get("Sender", {})
@@ -239,4 +241,6 @@ def _event_to_row(pm_id: str, msg: dict[str, Any], folder: str | None) -> Messag
         size=msg.get("Size"),
         has_attachments=bool(msg.get("NumAttachments", 0)),
         body_indexed=False,
+        conversation_id=msg.get("ConversationID", ""),
+        newsletter_id=msg.get("NewsletterSubscriptionID") or None,
     )

@@ -43,21 +43,20 @@ _DURATION_SECONDS = {
     "h": 3600,
     "d": 86400,
     "w": 604800,
-    "m": 2592000,    # 30 days
-    "y": 31536000,   # 365 days
+    "m": 2592000,  # 30 days
+    "y": 31536000,  # 365 days
 }
 
-_OPERATOR_RE = re.compile(
-    r'(\w[\w_]*):("(?:[^"]+)"|[^\s]+)'
-)
-_DURATION_RE = re.compile(r'^(\d+)([hdwmy])$')
+_OPERATOR_RE = re.compile(r'(\w[\w_]*):("(?:[^"]+)"|[^\s]+)')
+_DURATION_RE = re.compile(r"^(\d+)([hdwmy])$")
 
 
 @dataclass
 class ParsedQuery:
     where_clauses: list[str] = field(default_factory=list)
     params: list[Any] = field(default_factory=list)
-    fts_terms: str | None = None
+    fts_terms: str | None = None  # FTS5-sanitized (has * wildcards, quoted specials)
+    raw_fts_terms: str | None = None  # Original text (for embeddings + reranker)
 
     @property
     def where(self) -> str:
@@ -68,39 +67,42 @@ class ParsedQuery:
     def to_sql(self, limit: int, offset: int = 0) -> tuple[str, list[Any]]:
         """Generate a complete SELECT SQL and parameter list."""
         if self.fts_terms:
-            # Search body (FTS5), sender_name, sender_email, and subject
+            # FTS5 body match ordered by BM25 inside the subquery.
+            # bm25() is only valid when the FTS table is in the FROM of that
+            # specific query — it cannot survive a JOIN or outer reference.
+            # We order + limit inside the IN subquery so only the top BM25
+            # candidates reach the outer GROUP BY deduplication step.
             where_filter = f"AND {self.where}" if self.where != "1" else ""
+
             sql = f"""
-                SELECT m.* FROM messages m
-                LEFT JOIN message_bodies mb ON mb.pm_id = m.pm_id
-                LEFT JOIN fts_bodies f ON f.rowid = mb.rowid
-                WHERE (
-                    fts_bodies MATCH ?
-                    OR m.sender_name LIKE ?
-                    OR m.sender_email LIKE ?
-                    OR m.subject LIKE ?
+                SELECT m.rowid, m.* FROM messages m
+                WHERE m.pm_id IN (
+                    SELECT mb.pm_id FROM message_bodies mb
+                    JOIN fts_bodies f ON f.rowid = mb.rowid
+                    WHERE fts_bodies MATCH ?
+                    ORDER BY bm25(fts_bodies)
+                    LIMIT ?
                 )
                 {where_filter}
+                GROUP BY m.message_id
                 ORDER BY m.date DESC
                 LIMIT ? OFFSET ?
             """
-            like_term = f"%{self.fts_terms.strip('\"')}%"
             params = [
                 self.fts_terms,
-                like_term,
-                like_term,
-                like_term,
+                limit,  # inner BM25 subquery limit
                 *self.params,
-                limit,
+                limit,  # outer LIMIT
                 offset,
             ]
         else:
-            sql = """
-                SELECT * FROM messages
-                WHERE {where}
+            sql = f"""
+                SELECT rowid, * FROM messages
+                WHERE {self.where}
+                GROUP BY message_id
                 ORDER BY date DESC
                 LIMIT ? OFFSET ?
-            """.format(where=self.where)
+            """
             params = [*self.params, limit, offset]
 
         return sql, params
@@ -124,6 +126,7 @@ def build_query(query: str) -> ParsedQuery:
     # Whatever's left is free-text for FTS
     fts = remaining.strip()
     if fts:
+        result.raw_fts_terms = fts
         result.fts_terms = _sanitize_fts(fts)
 
     return result
@@ -135,23 +138,24 @@ def _sanitize_fts(text: str) -> str:
     FTS5 treats -, +, *, etc. as operators. Wrap tokens containing
     special chars in double quotes so they're treated as literals.
     Already-quoted phrases are left as-is.
+
+    Plain words get a trailing * for prefix matching so that e.g.
+    "physio" matches "physiotherapy", "invoice" matches "invoiced", etc.
     """
     tokens = []
     for part in re.findall(r'"[^"]*"|\S+', text):
         if part.startswith('"') and part.endswith('"'):
-            tokens.append(part)  # already quoted
-        elif re.search(r'[^\w\s]', part):
-            tokens.append(f'"{part}"')  # quote it
+            tokens.append(part)  # already quoted — exact phrase, no wildcard
+        elif re.search(r"[^\w\s]", part):
+            tokens.append(f'"{part}"')  # quote it (literal, no wildcard)
         else:
-            tokens.append(part)
+            tokens.append(f"{part}*")  # prefix match
     return " ".join(tokens)
 
 
 def _apply_operator(result: ParsedQuery, op: str, val: str) -> None:
     if op == "from":
-        result.where_clauses.append(
-            "(sender_email LIKE ? OR sender_name LIKE ?)"
-        )
+        result.where_clauses.append("(sender_email LIKE ? OR sender_name LIKE ?)")
         result.params.extend([f"%{val}%", f"%{val}%"])
 
     elif op == "to":

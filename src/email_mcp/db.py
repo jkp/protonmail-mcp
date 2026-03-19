@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
     size            INTEGER,
     has_attachments INTEGER NOT NULL DEFAULT 0,
     body_indexed    INTEGER NOT NULL DEFAULT 0,
+    conversation_id TEXT    NOT NULL DEFAULT '',
     created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -120,9 +121,12 @@ class MessageRow:
     size: int | None
     has_attachments: bool
     body_indexed: bool
+    conversation_id: str = ""
     embedded: bool = False
+    newsletter_id: str | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
     updated_at: int = field(default_factory=lambda: int(time.time()))
+    row_id: int | None = None
 
 
 # ── Accessors ────────────────────────────────────────────────────────────────
@@ -155,8 +159,9 @@ class _MessagesAccessor:
             INSERT INTO messages (
                 pm_id, message_id, subject, sender_name, sender_email,
                 recipients, date, unread, label_ids, folder, size,
-                has_attachments, body_indexed, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                has_attachments, body_indexed, conversation_id,
+                newsletter_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pm_id) DO UPDATE SET
                 message_id      = excluded.message_id,
                 subject         = excluded.subject,
@@ -169,8 +174,11 @@ class _MessagesAccessor:
                 folder          = excluded.folder,
                 size            = excluded.size,
                 has_attachments = excluded.has_attachments,
-                body_indexed    = excluded.body_indexed,
+                conversation_id = excluded.conversation_id,
+                newsletter_id   = excluded.newsletter_id,
                 updated_at      = excluded.updated_at
+                -- body_indexed, embedded, parsed_headers, headers_indexed
+                -- are NOT updated here: managed by their respective indexers
             """,
             [
                 row.pm_id,
@@ -186,6 +194,8 @@ class _MessagesAccessor:
                 row.size,
                 int(row.has_attachments),
                 int(row.body_indexed),
+                row.conversation_id,
+                row.newsletter_id,
                 row.created_at,
                 now,
             ],
@@ -193,7 +203,16 @@ class _MessagesAccessor:
         self._conn.commit()
 
     def get(self, pm_id: str) -> MessageRow | None:
-        row = self._conn.execute("SELECT * FROM messages WHERE pm_id = ?", [pm_id]).fetchone()
+        row = self._conn.execute(
+            "SELECT rowid, * FROM messages WHERE pm_id = ?", [pm_id]
+        ).fetchone()
+        return _row_to_message(row) if row else None
+
+    def get_by_id(self, row_id: int) -> MessageRow | None:
+        """Look up a message by its SQLite rowid."""
+        row = self._conn.execute(
+            "SELECT rowid, * FROM messages WHERE rowid = ?", [row_id]
+        ).fetchone()
         return _row_to_message(row) if row else None
 
     def delete(self, pm_id: str) -> None:
@@ -202,7 +221,9 @@ class _MessagesAccessor:
 
     def list_by_folder(self, folder: str, limit: int, offset: int = 0) -> list[MessageRow]:
         rows = self._conn.execute(
-            "SELECT * FROM messages WHERE folder = ? ORDER BY date DESC LIMIT ? OFFSET ?",
+            "SELECT rowid, * FROM messages WHERE folder = ?"
+            " GROUP BY message_id"
+            " ORDER BY date DESC LIMIT ? OFFSET ?",
             [folder, limit, offset],
         ).fetchall()
         return [_row_to_message(r) for r in rows]
@@ -230,7 +251,8 @@ class _MessagesAccessor:
 
     def count_by_folder(self, folder: str) -> dict[str, int]:
         rows = self._conn.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN unread = 1 THEN 1 ELSE 0 END)"
+            "SELECT COUNT(DISTINCT message_id),"
+            " SUM(CASE WHEN unread = 1 THEN 1 ELSE 0 END)"
             " FROM messages WHERE folder = ?",
             [folder],
         ).fetchone()
@@ -416,6 +438,21 @@ class Database:
         for col, typedef in [("att_id", "TEXT"), ("key_packets", "TEXT")]:
             if col not in existing:
                 self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} {typedef}")
+
+        msg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "conversation_id" not in msg_cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "newsletter_id" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN newsletter_id TEXT")
+        if "parsed_headers" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN parsed_headers TEXT")
+        if "headers_indexed" not in msg_cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN headers_indexed INTEGER NOT NULL DEFAULT 0"
+            )
+
         self._conn.commit()
 
 
@@ -423,6 +460,7 @@ class Database:
 
 
 def _row_to_message(row: sqlite3.Row) -> MessageRow:
+    keys = row.keys()
     return MessageRow(
         pm_id=row["pm_id"],
         message_id=row["message_id"],
@@ -437,10 +475,31 @@ def _row_to_message(row: sqlite3.Row) -> MessageRow:
         size=row["size"],
         has_attachments=bool(row["has_attachments"]),
         body_indexed=bool(row["body_indexed"]),
-        embedded=bool(row["embedded"]) if "embedded" in row.keys() else False,
+        conversation_id=row["conversation_id"] if "conversation_id" in keys else "",
+        embedded=bool(row["embedded"]) if "embedded" in keys else False,
+        newsletter_id=row["newsletter_id"] if "newsletter_id" in keys else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        row_id=row["rowid"] if "rowid" in keys else None,
     )
+
+
+def resolve_message(db_: Database, identifier: int | str) -> MessageRow | None:
+    """Resolve a message by numeric id (rowid), message_id, or pm_id.
+
+    Numeric ids (int or digit-only strings) look up by SQLite rowid.
+    Non-numeric strings fall back to message_id / pm_id lookup.
+    """
+    if isinstance(identifier, int) or (isinstance(identifier, str) and identifier.isdigit()):
+        row = db_.execute(
+            "SELECT rowid, * FROM messages WHERE rowid = ?", [int(identifier)]
+        ).fetchone()
+    else:
+        row = db_.execute(
+            "SELECT rowid, * FROM messages WHERE message_id = ? OR pm_id = ?",
+            [identifier, identifier],
+        ).fetchone()
+    return _row_to_message(row) if row else None
 
 
 # ── Unused import for re-export (tests import SyncState directly) ─────────────

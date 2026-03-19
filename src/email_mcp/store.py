@@ -147,12 +147,14 @@ class MaildirStore:
                 continue
             cur_count = sum(1 for _ in (entry / "cur").iterdir())
             new_count = sum(1 for _ in (entry / "new").iterdir()) if (entry / "new").is_dir() else 0
-            folders.append(Folder(
-                name=entry.name,
-                path=str(entry),
-                count=cur_count + new_count,
-                unread=new_count,
-            ))
+            folders.append(
+                Folder(
+                    name=entry.name,
+                    path=str(entry),
+                    count=cur_count + new_count,
+                    unread=new_count,
+                )
+            )
         return folders
 
     def _find_message_files(self, folder: str) -> list[Path]:
@@ -184,9 +186,9 @@ class MaildirStore:
         """Parse only the headers of an email file."""
         try:
             with path.open("rb") as f:
-                return email.parser.BytesParser(
-                    policy=email.policy.default
-                ).parse(f, headersonly=True)
+                return email.parser.BytesParser(policy=email.policy.default).parse(
+                    f, headersonly=True
+                )
         except Exception:
             logger.debug("store.parse_header_failed", path=str(path))
             return None
@@ -195,9 +197,7 @@ class MaildirStore:
         """Parse a full email file."""
         try:
             with path.open("rb") as f:
-                return email.parser.BytesParser(
-                    policy=email.policy.default
-                ).parse(f)
+                return email.parser.BytesParser(policy=email.policy.default).parse(f)
         except Exception:
             logger.debug("store.parse_failed", path=str(path))
             return None
@@ -270,7 +270,7 @@ class MaildirStore:
         files = self._find_message_files(folder)
         # Sort by modification time, newest first
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        files = files[offset: offset + limit]
+        files = files[offset : offset + limit]
 
         emails = []
         for path in files:
@@ -281,17 +281,19 @@ class MaildirStore:
             date, date_str = _parse_date(msg)
             flags = _get_flags(path)
             detected_folder = self._folder_from_path(path)
-            emails.append(Email(
-                message_id=mid,
-                folder=detected_folder,
-                path=str(path),
-                from_=_parse_address(msg.get("From", "")),
-                to=_parse_address_list(msg.get("To")),
-                subject=msg.get("Subject", ""),
-                date=date,
-                date_str=date_str,
-                flags=flags,
-            ))
+            emails.append(
+                Email(
+                    message_id=mid,
+                    folder=detected_folder,
+                    path=str(path),
+                    from_=_parse_address(msg.get("From", "")),
+                    to=_parse_address_list(msg.get("To")),
+                    subject=msg.get("Subject", ""),
+                    date=date,
+                    date_str=date_str,
+                    flags=flags,
+                )
+            )
         return emails
 
     def move_email(self, message_id: str, to_folder: str, from_folder: str | None = None) -> bool:
@@ -368,7 +370,7 @@ class MaildirStore:
         for part in msg.walk():
             if part.get_filename() == filename:
                 payload = part.get_payload(decode=True)
-                if payload is not None:
+                if isinstance(payload, bytes):
                     return payload, part.get_content_type()
         return None
 

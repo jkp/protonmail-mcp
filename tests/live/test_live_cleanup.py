@@ -15,14 +15,13 @@ from tests.live.conftest import (
     TEST_SUBJECT_PREFIX,
     _parse_result,
     live,
-    skip_no_maildir,
-    skip_no_notmuch,
+    skip_no_api,
 )
 
 pytestmark = [
     live,
-    skip_no_maildir,
-    skip_no_notmuch,
+    skip_no_api,
+    skip_no_api,
     pytest.mark.timeout(120),
     pytest.mark.order("last"),
 ]
