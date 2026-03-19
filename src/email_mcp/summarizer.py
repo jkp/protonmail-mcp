@@ -11,7 +11,6 @@ one cached yet. Typical wall time: <500ms for 20 emails.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import httpx
 import structlog

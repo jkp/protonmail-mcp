@@ -1,6 +1,5 @@
 """Tests for the lazy email summarizer."""
 
-import json
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -135,9 +134,7 @@ class TestSummarize:
             new_callable=AsyncMock,
             return_value="New email summary.",
         ) as mock_llm:
-            results = await summarize_messages(
-                ["pm-cached", "pm-new"], db, api_key="test-key"
-            )
+            results = await summarize_messages(["pm-cached", "pm-new"], db, api_key="test-key")
 
         assert results["pm-cached"] == "Already summarized."
         assert results["pm-new"] == "New email summary."

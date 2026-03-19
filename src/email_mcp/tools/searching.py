@@ -8,6 +8,7 @@ import structlog
 from email_mcp.db import _row_to_message
 from email_mcp.embedder import Embedder
 from email_mcp.query_builder import build_query
+from email_mcp.relevance import score_relevance
 from email_mcp.server import db, mcp, settings
 from email_mcp.summarizer import summarize_messages
 from email_mcp.tools.listing import _web_url
@@ -360,5 +361,16 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         except Exception as e:
             logger.warning("tool.search.summarize_error", error=str(e))
 
-    logger.info("tool.search.done", query=query, count=len(results))
-    return [_format_result(r, summaries.get(r.pm_id)) for r in results]
+    formatted = [_format_result(r, summaries.get(r.pm_id)) for r in results]
+
+    # LLM relevance filter — one call to score all results, drop the noise
+    if formatted and settings.together_api_key and parsed.raw_fts_terms:
+        try:
+            formatted = await score_relevance(
+                parsed.raw_fts_terms, formatted, api_key=settings.together_api_key
+            )
+        except Exception as e:
+            logger.warning("tool.search.relevance_error", error=str(e))
+
+    logger.info("tool.search.done", query=query, count=len(formatted))
+    return formatted
