@@ -452,6 +452,8 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN headers_indexed INTEGER NOT NULL DEFAULT 0"
             )
+        if "summary" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN summary TEXT")
 
         self._conn.commit()
 

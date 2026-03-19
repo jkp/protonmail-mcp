@@ -190,9 +190,7 @@ async def batch_archive(
     succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "6")
     _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Archive")
 
-    errors: list[dict[str, str | int]] = [
-        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
-    ]
+    errors: list[dict[str, str | int]] = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
     errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_archive.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
@@ -222,9 +220,7 @@ async def batch_mark_read(
     succeeded, failed_pm_ids = await _api_mark_read_chunks(pm_ids)
     _optimistic_mark_read([p for p in pm_ids if p not in failed_pm_ids])
 
-    errors: list[dict[str, str | int]] = [
-        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
-    ]
+    errors: list[dict[str, str | int]] = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
     errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_mark_read.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}
@@ -263,9 +259,7 @@ async def batch_delete(
     succeeded, failed_pm_ids = await _api_label_chunks(pm_ids, "3")
     _optimistic_update_folder([p for p in pm_ids if p not in failed_pm_ids], "Trash")
 
-    errors: list[dict[str, str | int]] = [
-        {"pm_id": p, "error": "api_error"} for p in failed_pm_ids
-    ]
+    errors: list[dict[str, str | int]] = [{"pm_id": p, "error": "api_error"} for p in failed_pm_ids]
     errors += [{"id": m, "error": "not_found"} for m in not_found]
     logger.info("tool.batch_delete.done", succeeded=succeeded, failed=len(errors))
     return {"status": "completed", "succeeded": succeeded, "failed": len(errors), "errors": errors}

@@ -8,7 +8,8 @@ import structlog
 from email_mcp.db import _row_to_message
 from email_mcp.embedder import Embedder
 from email_mcp.query_builder import build_query
-from email_mcp.server import db, mcp
+from email_mcp.server import db, mcp, settings
+from email_mcp.summarizer import summarize_messages
 from email_mcp.tools.listing import _web_url
 
 logger = structlog.get_logger()
@@ -170,8 +171,8 @@ def _format_date(unix_ts: int) -> str:
     return datetime.fromtimestamp(unix_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _format_result(r) -> dict[str, Any]:
-    return {
+def _format_result(r, summary: str | None = None) -> dict[str, Any]:
+    result = {
         "id": r.row_id,
         "from": (f"{r.sender_name} <{r.sender_email}>" if r.sender_name else r.sender_email),
         "subject": r.subject,
@@ -181,6 +182,9 @@ def _format_result(r) -> dict[str, Any]:
         "has_attachments": r.has_attachments,
         "web_url": _web_url(r.conversation_id, r.folder),
     }
+    if summary:
+        result["summary"] = summary
+    return result
 
 
 @mcp.tool(
@@ -346,5 +350,15 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         except Exception as e:
             logger.warning("tool.search.filter_error", error=str(e))
 
+    # Lazy-summarize results (parallel LLM calls, cached in DB)
+    summaries: dict[str, str] = {}
+    if results and settings.together_api_key:
+        try:
+            summaries = await summarize_messages(
+                [r.pm_id for r in results], db, api_key=settings.together_api_key
+            )
+        except Exception as e:
+            logger.warning("tool.search.summarize_error", error=str(e))
+
     logger.info("tool.search.done", query=query, count=len(results))
-    return [_format_result(r) for r in results]
+    return [_format_result(r, summaries.get(r.pm_id)) for r in results]
