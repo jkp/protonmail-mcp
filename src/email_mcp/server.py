@@ -482,10 +482,25 @@ import email_mcp.tools.searching  # noqa: F401, E402
 
 def _build_app():
     """Build the ASGI app with middleware (used by uvicorn reload mode)."""
+    from starlette.responses import JSONResponse
+
     from email_mcp.security import SecurityMiddleware
 
     _app = mcp.http_app(transport="http", stateless_http=True)
     _app.add_middleware(SecurityMiddleware, oauth_state_dir=settings.oauth_state_dir)  # type: ignore[arg-type]
+
+    # FastMCP doesn't mount this endpoint but Claude.ai requires it for
+    # OAuth discovery on remote MCP servers (RFC 9728).
+    @_app.route("/.well-known/oauth-protected-resource")
+    async def oauth_protected_resource(request):
+        base = str(settings.oauth_base_url or f"http://{settings.host}:{settings.port}")
+        return JSONResponse(
+            {
+                "resource": base,
+                "authorization_servers": [base],
+            }
+        )
+
     return _app
 
 
