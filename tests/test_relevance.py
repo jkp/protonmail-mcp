@@ -1,8 +1,6 @@
 """Tests for LLM-based relevance scoring."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, patch
 
 
 def _make_results(n: int) -> list[dict]:
@@ -113,8 +111,6 @@ class TestScoreRelevance:
             new_callable=AsyncMock,
             return_value=[5, 4, 3, 2, 1],
         ):
-            filtered = await score_relevance(
-                "test", results, api_key="test", threshold=4
-            )
+            filtered = await score_relevance("test", results, api_key="test", threshold=4)
 
         assert len(filtered) == 2

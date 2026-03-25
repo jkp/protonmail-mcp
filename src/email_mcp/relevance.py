@@ -53,7 +53,7 @@ async def score_relevance(
     lines = []
     for i, r in enumerate(results, 1):
         summary = r.get("summary", r.get("subject", ""))
-        lines.append(f'{i}. From: {r["from"]} | Subject: {r["subject"]} | {summary}')
+        lines.append(f"{i}. From: {r['from']} | Subject: {r['subject']} | {summary}")
 
     user_prompt = f"Query: {query}\n\nResults:\n" + "\n".join(lines)
 
