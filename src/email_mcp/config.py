@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     transport: Literal["stdio", "http"] = "stdio"
     host: str = "0.0.0.0"
     port: int = 10143
+    mcp_path: str = "/mcp"  # set to "/" when behind a path-stripping reverse proxy
     log_level: str = "INFO"
     reload: bool = False
 

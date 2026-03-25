@@ -486,7 +486,7 @@ def _build_app():
 
     from email_mcp.security import SecurityMiddleware
 
-    _app = mcp.http_app(transport="http", stateless_http=True)
+    _app = mcp.http_app(transport="http", stateless_http=True, path=settings.mcp_path)
     _app.add_middleware(SecurityMiddleware, oauth_state_dir=settings.oauth_state_dir)  # type: ignore[arg-type]
 
     # FastMCP doesn't mount this endpoint but Claude.ai requires it for
