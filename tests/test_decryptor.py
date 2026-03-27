@@ -161,6 +161,51 @@ class TestFetchAndDecryptBatch:
         assert "ok2" in results
         assert "bad" not in results
 
+
+# ── fetch_attachment ──────────────────────────────────────────────────────────
+
+
+class TestFetchAttachment:
+    async def test_reassembles_key_packets_and_data(
+        self, decryptor, mock_api, mock_key_ring
+    ):
+        """Attachment decryption prepends KeyPackets to DataPacket."""
+        import base64
+
+        key_packets = b"\x01\x02\x03"
+        data_packet = b"\x04\x05\x06"
+        key_packets_b64 = base64.b64encode(key_packets).decode()
+
+        mock_api.get_attachment = AsyncMock(return_value=data_packet)
+        mock_key_ring.decrypt_binary = MagicMock(return_value=b"decrypted content")
+
+        result = await decryptor.fetch_attachment("att-123", key_packets_b64)
+
+        assert result == b"decrypted content"
+        # Verify the full message passed to decrypt is key_packets + data_packet
+        mock_key_ring.decrypt_binary.assert_called_once_with(key_packets + data_packet)
+
+    async def test_raises_without_key_packets(self, decryptor, mock_api, mock_key_ring):
+        """Attachment decryption fails gracefully when no KeyPackets."""
+        mock_api.get_attachment = AsyncMock(return_value=b"data")
+
+        with pytest.raises(DecryptionError, match="No KeyPackets"):
+            await decryptor.fetch_attachment("att-123", "")
+
+    async def test_propagates_decrypt_error(self, decryptor, mock_api, mock_key_ring):
+        """Decrypt failure propagates as exception."""
+        import base64
+
+        mock_api.get_attachment = AsyncMock(return_value=b"data")
+        mock_key_ring.decrypt_binary = MagicMock(side_effect=DecryptionError("bad"))
+
+        with pytest.raises(DecryptionError):
+            await decryptor.fetch_attachment(
+                "att-123", base64.b64encode(b"key").decode()
+            )
+
+
+class TestBatchConcurrency:
     async def test_batch_concurrency(self, decryptor, mock_api, mock_key_ring):
         """Verify semaphore limits concurrency."""
         import asyncio

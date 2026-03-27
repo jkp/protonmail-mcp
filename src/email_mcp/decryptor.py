@@ -119,6 +119,11 @@ class ProtonDecryptor:
     async def fetch_attachment(self, att_id: str, key_packets_b64: str) -> bytes:
         """Fetch and decrypt an attachment by its ProtonMail attachment ID.
 
+        ProtonMail splits attachments into KeyPackets (encrypted session key)
+        and DataPacket (encrypted content). The API returns only the DataPacket.
+        To decrypt, we prepend the KeyPackets to form a complete PGP message,
+        then decrypt with the user's private key.
+
         Args:
             att_id: ProtonMail attachment ID.
             key_packets_b64: Base64-encoded encrypted session key packets.
@@ -126,13 +131,20 @@ class ProtonDecryptor:
         Returns:
             Decrypted attachment bytes.
         """
-        encrypted = await self._api.get_attachment(att_id)
+        data_packet = await self._api.get_attachment(att_id)
 
-        # The attachment is a PGP message encrypted with the session key.
-        # First decrypt the session key from KeyPackets, then use it to
-        # decrypt the attachment body.
+        if not key_packets_b64:
+            logger.warning("decryptor.attachment_no_key_packets", att_id=att_id)
+            raise DecryptionError("No KeyPackets for attachment — cannot decrypt")
+
+        # Reassemble: KeyPackets + DataPacket = complete PGP message
+        import base64
+
+        key_packets = base64.b64decode(key_packets_b64)
+        full_message = key_packets + data_packet
+
         try:
-            return self._key_ring.decrypt_binary(encrypted)
+            return self._key_ring.decrypt_binary(full_message)
         except Exception:
             logger.warning("decryptor.attachment_decrypt_failed", att_id=att_id)
             raise
