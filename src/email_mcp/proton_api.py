@@ -119,11 +119,15 @@ class ProtonClient:
         password: str,
         session_path: Path,
         base_url: str = _API_BASE,
+        ntfy_url: str = "",
+        ntfy_topic: str = "",
     ) -> None:
         self._username = username
         self._password = password
         self._session_path = session_path
         self._base_url = base_url
+        self._ntfy_url = ntfy_url
+        self._ntfy_topic = ntfy_topic
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._uid: str | None = None
@@ -220,12 +224,42 @@ class ProtonClient:
                 )
 
             if response.status_code != 200:
-                raise AuthError(f"Token refresh failed: HTTP {response.status_code}")
+                msg = f"Token refresh failed: HTTP {response.status_code}"
+                await self._ntfy_alert(
+                    "Email MCP: Auth Failed",
+                    f"{msg} — re-authentication required",
+                    priority="urgent",
+                    tags="warning",
+                )
+                raise AuthError(msg)
 
             data = response.json()
             self._access_token = data["AccessToken"]
             self._refresh_token = data["RefreshToken"]
             self._save_session()
+
+    # ── Alerts ────────────────────────────────────────────────────────────────
+
+    async def _ntfy_alert(
+        self, title: str, message: str, priority: str = "default", tags: str = ""
+    ) -> None:
+        """Send a push notification via ntfy. Silently fails if not configured."""
+        if not self._ntfy_url or not self._ntfy_topic:
+            return
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{self._ntfy_url}/{self._ntfy_topic}",
+                    content=message,
+                    headers={
+                        "Title": title,
+                        "Priority": priority,
+                        "Tags": tags,
+                    },
+                    timeout=5.0,
+                )
+        except Exception:
+            pass  # Best-effort — don't let notification failure break auth flow
 
     # ── Event loop ────────────────────────────────────────────────────────────
 

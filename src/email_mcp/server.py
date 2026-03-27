@@ -57,6 +57,8 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         username=settings.imap_username,
         password=settings.proton_password,
         session_path=settings.proton_session_file,
+        ntfy_url=settings.ntfy_url,
+        ntfy_topic=settings.ntfy_topic,
     )
 
     # 2. Set refs on tools
