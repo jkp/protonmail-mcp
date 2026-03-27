@@ -166,9 +166,7 @@ class TestFetchAndDecryptBatch:
 
 
 class TestFetchAttachment:
-    async def test_reassembles_key_packets_and_data(
-        self, decryptor, mock_api, mock_key_ring
-    ):
+    async def test_reassembles_key_packets_and_data(self, decryptor, mock_api, mock_key_ring):
         """Attachment decryption prepends KeyPackets to DataPacket."""
         import base64
 
@@ -200,9 +198,7 @@ class TestFetchAttachment:
         mock_key_ring.decrypt_binary = MagicMock(side_effect=DecryptionError("bad"))
 
         with pytest.raises(DecryptionError):
-            await decryptor.fetch_attachment(
-                "att-123", base64.b64encode(b"key").decode()
-            )
+            await decryptor.fetch_attachment("att-123", base64.b64encode(b"key").decode())
 
 
 class TestBatchConcurrency:

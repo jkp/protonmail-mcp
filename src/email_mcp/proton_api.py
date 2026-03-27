@@ -17,6 +17,7 @@ System labels (folders):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -126,6 +127,7 @@ class ProtonClient:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._uid: str | None = None
+        self._refresh_lock: asyncio.Lock | None = None
         self._load_session()
 
     # ── Session persistence ───────────────────────────────────────────────────
@@ -191,29 +193,39 @@ class ProtonClient:
         return data
 
     async def _refresh_access_token(self) -> None:
-        if not self._refresh_token or not self._uid:
-            raise AuthError("No refresh token available — re-authentication required")
+        """Refresh the access token. Uses a lock to prevent concurrent refreshes.
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._base_url}/auth/refresh",
-                json={
-                    "ResponseType": "token",
-                    "GrantType": "refresh_token",
-                    "RefreshToken": self._refresh_token,
-                    "RedirectURI": "",
-                },
-                headers={"x-pm-uid": self._uid, "x-pm-appversion": "Other"},
-                timeout=30.0,
-            )
+        ProtonMail refresh tokens are single-use — if two requests both try
+        to refresh simultaneously, the second will fail because the first
+        already consumed the token. The lock serializes refresh attempts.
+        """
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
 
-        if response.status_code != 200:
-            raise AuthError(f"Token refresh failed: HTTP {response.status_code}")
+        async with self._refresh_lock:
+            if not self._refresh_token or not self._uid:
+                raise AuthError("No refresh token available — re-authentication required")
 
-        data = response.json()
-        self._access_token = data["AccessToken"]
-        self._refresh_token = data["RefreshToken"]
-        self._save_session()
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self._base_url}/auth/refresh",
+                    json={
+                        "ResponseType": "token",
+                        "GrantType": "refresh_token",
+                        "RefreshToken": self._refresh_token,
+                        "RedirectURI": "",
+                    },
+                    headers={"x-pm-uid": self._uid, "x-pm-appversion": "Other"},
+                    timeout=30.0,
+                )
+
+            if response.status_code != 200:
+                raise AuthError(f"Token refresh failed: HTTP {response.status_code}")
+
+            data = response.json()
+            self._access_token = data["AccessToken"]
+            self._refresh_token = data["RefreshToken"]
+            self._save_session()
 
     # ── Event loop ────────────────────────────────────────────────────────────
 
