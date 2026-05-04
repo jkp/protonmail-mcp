@@ -127,6 +127,91 @@ async def test_send_external_recipient(mock_api, mock_key_ring):
     assert pkg["Addresses"]["ferdi@outlook.com"]["Signature"] == 1
 
 
+async def test_send_external_with_attachments_includes_attachment_keys(mock_api, mock_key_ring):
+    """Forwarding an attachment to a non-Proton recipient must populate
+    AttachmentKeys on the external (Type 4) package; otherwise Proton
+    rejects the send with code 2001 'Missing attachment key'."""
+    mock_api._request = AsyncMock(
+        side_effect=[
+            {"RecipientType": 2},  # key lookup → external
+            {"Message": {"ID": "draft-789"}},  # create draft
+            {"Code": 1000},  # send
+        ]
+    )
+    mock_api.upload_attachment = AsyncMock(return_value={"ID": "att-1"})
+
+    sender = _make_sender(mock_api, mock_key_ring)
+    # Skip real PGP — return deterministic fake packets per attachment
+    sender._encrypt_attachment = MagicMock(
+        return_value=(b"\xc1\x02\xaa\xbb", b"\xd2\x03\x01\x02\x03", b"sig")
+    )
+
+    msg = EmailMessage()
+    msg["From"] = "Bob <bob@protonmail.com>"
+    msg["To"] = "kirkconsulting@qbodocs.com"
+    msg["Subject"] = "Receipt forward"
+    msg.set_content("FYI")
+
+    await sender.send(
+        msg,
+        attachments=[("receipt.pdf", "application/pdf", b"%PDF-1.4 fake")],
+        action=2,
+    )
+
+    # Upload was called once
+    assert mock_api.upload_attachment.await_count == 1
+
+    send_call = mock_api._request.call_args_list[2]
+    pkg = send_call.kwargs["json"]["Packages"][0]
+    assert pkg["Type"] == 4
+    # The fix: AttachmentKeys must be present and reference the uploaded ID
+    assert "AttachmentKeys" in pkg, "external package missing AttachmentKeys → Proton 2001"
+    att_keys = pkg["AttachmentKeys"]
+    assert "att-1" in att_keys
+    assert att_keys["att-1"]["Algorithm"] == "aes256"
+    # Session key bytes round-trip through base64
+    assert att_keys["att-1"]["Key"] == base64.b64encode(b"\x00" * 32).decode()
+
+
+async def test_send_internal_with_attachments_does_not_emit_attachment_keys(
+    mock_api, mock_key_ring
+):
+    """Internal (Type 1) packages don't use AttachmentKeys — the server
+    re-encrypts using the per-attachment KeyPackets stored on the draft.
+    Including AttachmentKeys here would be at best ignored and at worst
+    surface a session key to internal recipients unnecessarily."""
+    mock_api._request = AsyncMock(
+        side_effect=[
+            {"RecipientType": 1},  # internal
+            {"Message": {"ID": "draft-456"}},
+            {"Code": 1000},
+        ]
+    )
+    mock_api.upload_attachment = AsyncMock(return_value={"ID": "att-2"})
+
+    sender = _make_sender(mock_api, mock_key_ring)
+    sender._encrypt_attachment = MagicMock(
+        return_value=(b"\xc1\x02\xaa\xbb", b"\xd2\x03\x01\x02\x03", b"sig")
+    )
+
+    msg = EmailMessage()
+    msg["From"] = "Bob <bob@protonmail.com>"
+    msg["To"] = "alice@protonmail.com"
+    msg["Subject"] = "Internal forward"
+    msg.set_content("FYI")
+
+    await sender.send(
+        msg,
+        attachments=[("receipt.pdf", "application/pdf", b"%PDF-1.4 fake")],
+        action=2,
+    )
+
+    send_call = mock_api._request.call_args_list[2]
+    pkg = send_call.kwargs["json"]["Packages"][0]
+    assert pkg["Type"] == 1
+    assert "AttachmentKeys" not in pkg
+
+
 async def test_send_not_initialized_returns_error(mock_key_ring):
     """ProtonSender should fail clearly when address not found."""
     api = AsyncMock()
