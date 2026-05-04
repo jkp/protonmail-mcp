@@ -148,9 +148,7 @@ class TestSkipFilter:
             model=mock_model,
             skip_senders=["notifications@github.com"],
         )
-        _insert_message(
-            db, "pm-1", sender_email="notifications@github.com", body="PR opened"
-        )
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="PR opened")
         emb.embed_batch(["pm-1"])
         row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
         assert row[0] == -1
@@ -182,9 +180,7 @@ class TestSkipFilter:
         _insert_message(db, "pm-1", sender_email="Notifications@GitHub.com", body="x")
         _insert_message(db, "pm-2", sender_email="seller@Ebay.com", body="y")
         emb.embed_batch(["pm-1", "pm-2"])
-        rows = db.execute(
-            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
-        ).fetchall()
+        rows = db.execute("SELECT pm_id, embedded FROM messages ORDER BY pm_id").fetchall()
         assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1}
 
     def test_non_matching_sender_still_embedded(self, db, mock_model):
@@ -223,9 +219,7 @@ class TestMarkSkippedExisting:
         n = emb.mark_skipped_existing()
 
         assert n == 2
-        rows = db.execute(
-            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
-        ).fetchall()
+        rows = db.execute("SELECT pm_id, embedded FROM messages ORDER BY pm_id").fetchall()
         assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1, "pm-3": 0}
 
     def test_marks_glob_pattern_rows(self, db, mock_model):
@@ -238,8 +232,7 @@ class TestMarkSkippedExisting:
 
         assert n == 2
         embedded = {
-            r[0]: r[1]
-            for r in db.execute("SELECT pm_id, embedded FROM messages").fetchall()
+            r[0]: r[1] for r in db.execute("SELECT pm_id, embedded FROM messages").fetchall()
         }
         assert embedded["pm-1"] == -1
         assert embedded["pm-2"] == -1

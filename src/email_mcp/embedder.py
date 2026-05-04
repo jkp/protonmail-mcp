@@ -474,9 +474,7 @@ class Embedder:
 
         sql = (
             "UPDATE messages SET embedded = -1"
-            " WHERE embedded = 0 AND ("
-            + " OR ".join(clauses)
-            + ")"
+            " WHERE embedded = 0 AND (" + " OR ".join(clauses) + ")"
         )
         cur = self._db.execute(sql, params)
         self._db.commit()
