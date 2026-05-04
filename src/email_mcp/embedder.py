@@ -11,7 +11,7 @@ Downstream of body indexer: only embeds messages with body_indexed=1.
 
 from __future__ import annotations
 
-import os
+import fnmatch
 import struct
 from typing import Any
 
@@ -93,13 +93,33 @@ class Embedder:
         model: Any = None,
         model_name: str = _DEFAULT_MODEL,
         api_key: str = "",
+        skip_senders: list[str] | None = None,
+        skip_domains: list[str] | None = None,
     ) -> None:
         self._db = db
         self._model_name = model_name
         self._together_key = api_key
         self._local_model = model  # None = lazy-load on first search
         self._reranker = None  # Lazy-load on first search
+        self._skip_senders = [s.lower() for s in (skip_senders or [])]
+        self._skip_domains = [d.lower() for d in (skip_domains or [])]
         self._ensure_table()
+
+    def _should_skip(self, sender_email: str | None) -> bool:
+        """Return True if this sender matches the configured skip list."""
+        if not sender_email:
+            return False
+        addr = sender_email.lower()
+        domain = addr.rpartition("@")[2]
+        if domain and domain in self._skip_domains:
+            return True
+        for pattern in self._skip_senders:
+            if "*" in pattern or "?" in pattern:
+                if fnmatch.fnmatchcase(addr, pattern):
+                    return True
+            elif addr == pattern:
+                return True
+        return False
 
     @staticmethod
     def _load_local_model(model_name: str) -> Any:
@@ -211,6 +231,7 @@ class Embedder:
         all_texts = []
         all_chunk_ids = []
         skip_ids = []
+        filtered_ids = []
 
         for pm_id in pm_ids:
             body = self._db.bodies.get(pm_id)
@@ -220,6 +241,9 @@ class Embedder:
             msg = self._db.messages.get(pm_id)
             if not msg:
                 skip_ids.append(pm_id)
+                continue
+            if self._should_skip(msg.sender_email):
+                filtered_ids.append(pm_id)
                 continue
 
             sender = msg.sender_name or msg.sender_email
@@ -244,6 +268,16 @@ class Embedder:
         if skip_ids:
             self._db.commit()
             logger.info("embedder.skipped_empty", count=len(skip_ids))
+
+        # Filter-matched senders also get -1 so they aren't retried
+        for pm_id in filtered_ids:
+            self._db.execute(
+                "UPDATE messages SET embedded = -1 WHERE pm_id = ?",
+                [pm_id],
+            )
+        if filtered_ids:
+            self._db.commit()
+            logger.info("embedder.skipped_filter", count=len(filtered_ids))
 
         if not all_texts:
             return 0
@@ -411,6 +445,45 @@ class Embedder:
             top_score=f"{ranked[0][0]:.2f}" if ranked else None,
         )
         return [msg for _, msg in ranked]
+
+    def mark_skipped_existing(self) -> int:
+        """One-shot: mark all currently-unembedded messages whose sender matches
+        the skip list as embedded=-1, dropping them from the embed backlog.
+
+        Only touches rows with embedded=0 — work already done isn't undone.
+        Returns the number of rows updated.
+        """
+        if not self._skip_senders and not self._skip_domains:
+            return 0
+
+        clauses: list[str] = []
+        params: list[str] = []
+
+        for pattern in self._skip_senders:
+            if "*" in pattern or "?" in pattern:
+                clauses.append("LOWER(sender_email) GLOB ?")
+                params.append(pattern.lower())
+            else:
+                clauses.append("LOWER(sender_email) = ?")
+                params.append(pattern.lower())
+
+        for domain in self._skip_domains:
+            # Use a glob so we don't false-match suffixes like "evil-amazon.co.uk"
+            clauses.append("LOWER(sender_email) GLOB ?")
+            params.append(f"*@{domain.lower()}")
+
+        sql = (
+            "UPDATE messages SET embedded = -1"
+            " WHERE embedded = 0 AND ("
+            + " OR ".join(clauses)
+            + ")"
+        )
+        cur = self._db.execute(sql, params)
+        self._db.commit()
+        n = cur.rowcount or 0
+        if n:
+            logger.info("embedder.mark_skipped_existing", count=n)
+        return n
 
     def get_unembedded(self, limit: int = 1000) -> list[str]:
         """Get pm_ids that have bodies but aren't embedded yet.

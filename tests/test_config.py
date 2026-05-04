@@ -50,3 +50,32 @@ def test_old_env_vars_ignored(monkeypatch):
     # Should not raise
     settings = Settings()
     assert settings.imap_username == ""
+
+
+def test_embed_skip_defaults_ship_in():
+    """Defaults include the patterns that produce most of J-Dog's noise."""
+    settings = Settings()
+    senders = [s.lower() for s in settings.embed_skip_senders_list]
+    domains = [d.lower() for d in settings.embed_skip_domains_list]
+    assert "notifications@github.com" in senders
+    assert "noreply@*" in senders
+    assert "amazon.co.uk" in domains
+    assert "ebay.com" in domains
+
+
+def test_embed_skip_env_overrides(monkeypatch):
+    """Comma-separated env vars override defaults entirely."""
+    monkeypatch.setenv("EMAIL_MCP_EMBED_SKIP_SENDERS", "a@x.com, b@y.com ,c@z.com")
+    monkeypatch.setenv("EMAIL_MCP_EMBED_SKIP_DOMAINS", "spam.com,promo.net")
+    settings = Settings()
+    assert settings.embed_skip_senders_list == ["a@x.com", "b@y.com", "c@z.com"]
+    assert settings.embed_skip_domains_list == ["spam.com", "promo.net"]
+
+
+def test_embed_skip_empty_string_disables(monkeypatch):
+    """Setting to empty string disables filtering."""
+    monkeypatch.setenv("EMAIL_MCP_EMBED_SKIP_SENDERS", "")
+    monkeypatch.setenv("EMAIL_MCP_EMBED_SKIP_DOMAINS", "")
+    settings = Settings()
+    assert settings.embed_skip_senders_list == []
+    assert settings.embed_skip_domains_list == []

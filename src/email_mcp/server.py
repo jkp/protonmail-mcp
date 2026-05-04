@@ -252,11 +252,23 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         try:
             from email_mcp.embedder import Embedder
 
-            embedder = Embedder(db=db, api_key=settings.together_api_key)
+            embedder = Embedder(
+                db=db,
+                api_key=settings.together_api_key,
+                skip_senders=settings.embed_skip_senders_list,
+                skip_domains=settings.embed_skip_domains_list,
+            )
             import email_mcp.tools.searching as searching_mod
 
             searching_mod._embedder = embedder
-            logger.info("server.embedder_loaded")
+            logger.info(
+                "server.embedder_loaded",
+                skip_senders=len(settings.embed_skip_senders_list),
+                skip_domains=len(settings.embed_skip_domains_list),
+            )
+            # One-shot: drop matching messages from the embed backlog so we don't
+            # waste cycles on github notifications, amazon receipts, etc.
+            embedder.mark_skipped_existing()
         except Exception:
             logger.warning("server.embedder_load_failed", exc_info=True)
 

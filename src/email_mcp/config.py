@@ -63,6 +63,22 @@ class Settings(BaseSettings):
     # Embedding API (optional — local model used as fallback)
     together_api_key: str = ""
 
+    # Senders/domains to skip when embedding. FTS still indexes these — we just
+    # don't pay the embedding cost for high-volume notification mail.
+    # Comma-separated. Senders may be exact ("foo@bar.com") or glob ("noreply@*").
+    embed_skip_senders: str = (
+        "notifications@github.com,service@paypal.co.uk,noreply@*,no-reply@*,donotreply@*"
+    )
+    embed_skip_domains: str = "amazon.co.uk,ebay.com"
+
+    @property
+    def embed_skip_senders_list(self) -> list[str]:
+        return [s.strip() for s in self.embed_skip_senders.split(",") if s.strip()]
+
+    @property
+    def embed_skip_domains_list(self) -> list[str]:
+        return [d.strip() for d in self.embed_skip_domains.split(",") if d.strip()]
+
     # Auth (optional, for HTTP transport)
     github_client_id: str | None = None
     github_client_secret: str | None = None

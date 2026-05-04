@@ -141,6 +141,146 @@ class TestVectorSearch:
         assert len(results) <= 3
 
 
+class TestSkipFilter:
+    def test_exact_sender_match_skipped(self, db, mock_model):
+        emb = Embedder(
+            db=db,
+            model=mock_model,
+            skip_senders=["notifications@github.com"],
+        )
+        _insert_message(
+            db, "pm-1", sender_email="notifications@github.com", body="PR opened"
+        )
+        emb.embed_batch(["pm-1"])
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == -1
+
+    def test_domain_match_skipped(self, db, mock_model):
+        emb = Embedder(db=db, model=mock_model, skip_domains=["amazon.co.uk"])
+        _insert_message(db, "pm-1", sender_email="orders@amazon.co.uk", body="Your order")
+        _insert_message(db, "pm-2", sender_email="alice@example.com", body="Hello")
+        emb.embed_batch(["pm-1", "pm-2"])
+        row1 = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        row2 = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-2'").fetchone()
+        assert row1[0] == -1
+        assert row2[0] == 1
+
+    def test_glob_match_skipped(self, db, mock_model):
+        emb = Embedder(db=db, model=mock_model, skip_senders=["noreply@*"])
+        _insert_message(db, "pm-1", sender_email="noreply@stripe.com", body="Receipt")
+        emb.embed_batch(["pm-1"])
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == -1
+
+    def test_match_is_case_insensitive(self, db, mock_model):
+        emb = Embedder(
+            db=db,
+            model=mock_model,
+            skip_senders=["NOTIFICATIONS@github.com"],
+            skip_domains=["EBAY.COM"],
+        )
+        _insert_message(db, "pm-1", sender_email="Notifications@GitHub.com", body="x")
+        _insert_message(db, "pm-2", sender_email="seller@Ebay.com", body="y")
+        emb.embed_batch(["pm-1", "pm-2"])
+        rows = db.execute(
+            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
+        ).fetchall()
+        assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1}
+
+    def test_non_matching_sender_still_embedded(self, db, mock_model):
+        emb = Embedder(
+            db=db,
+            model=mock_model,
+            skip_senders=["notifications@github.com"],
+            skip_domains=["amazon.co.uk"],
+        )
+        _insert_message(db, "pm-1", sender_email="alice@example.com", body="Hello")
+        emb.embed_batch(["pm-1"])
+        msg = db.messages.get("pm-1")
+        assert msg.embedded is True
+
+    def test_skipped_messages_not_returned_by_get_unembedded(self, db, mock_model):
+        emb = Embedder(db=db, model=mock_model, skip_senders=["notifications@github.com"])
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="PR")
+        _insert_message(db, "pm-2", sender_email="alice@example.com", body="Hi")
+        emb.embed_batch(["pm-1", "pm-2"])
+        # pm-1 was filtered (-1), pm-2 was embedded (1) — neither is unembedded (0)
+        assert emb.get_unembedded(limit=10) == []
+
+
+class TestMarkSkippedExisting:
+    def test_marks_existing_matching_rows(self, db, mock_model):
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="x")
+        _insert_message(db, "pm-2", sender_email="orders@amazon.co.uk", body="y")
+        _insert_message(db, "pm-3", sender_email="alice@example.com", body="z")
+        emb = Embedder(
+            db=db,
+            model=mock_model,
+            skip_senders=["notifications@github.com"],
+            skip_domains=["amazon.co.uk"],
+        )
+
+        n = emb.mark_skipped_existing()
+
+        assert n == 2
+        rows = db.execute(
+            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
+        ).fetchall()
+        assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1, "pm-3": 0}
+
+    def test_marks_glob_pattern_rows(self, db, mock_model):
+        _insert_message(db, "pm-1", sender_email="noreply@stripe.com", body="x")
+        _insert_message(db, "pm-2", sender_email="no-reply@github.com", body="y")
+        _insert_message(db, "pm-3", sender_email="alice@example.com", body="z")
+        emb = Embedder(db=db, model=mock_model, skip_senders=["noreply@*", "no-reply@*"])
+
+        n = emb.mark_skipped_existing()
+
+        assert n == 2
+        embedded = {
+            r[0]: r[1]
+            for r in db.execute("SELECT pm_id, embedded FROM messages").fetchall()
+        }
+        assert embedded["pm-1"] == -1
+        assert embedded["pm-2"] == -1
+        assert embedded["pm-3"] == 0
+
+    def test_idempotent(self, db, mock_model):
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="x")
+        emb = Embedder(db=db, model=mock_model, skip_senders=["notifications@github.com"])
+
+        first = emb.mark_skipped_existing()
+        second = emb.mark_skipped_existing()
+
+        assert first == 1
+        # Second call finds nothing new (all already -1)
+        assert second == 0
+
+    def test_no_filters_does_nothing(self, db, mock_model):
+        _insert_message(db, "pm-1", sender_email="alice@example.com", body="x")
+        emb = Embedder(db=db, model=mock_model)
+
+        n = emb.mark_skipped_existing()
+
+        assert n == 0
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == 0
+
+    def test_does_not_disturb_already_embedded(self, db, mock_model):
+        """A sender added to the skip list later shouldn't un-embed work already done."""
+        emb = Embedder(db=db, model=mock_model, skip_senders=["notifications@github.com"])
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="x")
+        # Pretend it was already embedded successfully before the filter was added
+        db.execute("UPDATE messages SET embedded = 1 WHERE pm_id = 'pm-1'")
+        db.commit()
+
+        n = emb.mark_skipped_existing()
+
+        assert n == 0
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == 1
+
+
 class TestUnembeddedQuery:
     def test_returns_unembedded_pm_ids(self, embedder, db):
         _insert_message(db, "pm-1", body="Hello")
