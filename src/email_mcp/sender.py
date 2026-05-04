@@ -242,11 +242,15 @@ class ProtonSender:
         )
         draft_id = draft["Message"]["ID"]
 
-        # Upload attachments to draft (if forwarding)
+        # Upload attachments to draft (if forwarding). Track each
+        # uploaded attachment's ID + key packet so we can emit
+        # AttachmentKeys for external (Type 4) recipients below — Proton
+        # rejects external sends with code 2001 otherwise.
+        uploaded_atts: list[tuple[str, str]] = []  # (att_id, key_packets_b64)
         if attachments:
             for filename, mime_type, content in attachments:
                 key_pkt, data_pkt, sig = self._encrypt_attachment(content, pub_key, from_email)
-                await self._api.upload_attachment(
+                result = await self._api.upload_attachment(
                     message_id=draft_id,
                     filename=filename,
                     mime_type=mime_type,
@@ -254,6 +258,9 @@ class ProtonSender:
                     data_packet=data_pkt,
                     signature=sig,
                 )
+                att_id = result.get("ID", "")
+                if att_id:
+                    uploaded_atts.append((att_id, base64.b64encode(key_pkt).decode()))
                 logger.info(
                     "proton.attachment_uploaded",
                     filename=filename,
@@ -288,18 +295,28 @@ class ProtonSender:
             ext_addrs = {}
             for email in external:
                 ext_addrs[email] = {"Type": 4, "Signature": 1}
-            packages.append(
-                {
-                    "Addresses": ext_addrs,
-                    "Type": 4,
-                    "MIMEType": "text/plain",
-                    "Body": data_b64,
-                    "BodyKey": {
-                        "Key": session_key_b64,
+            ext_pkg: dict[str, Any] = {
+                "Addresses": ext_addrs,
+                "Type": 4,
+                "MIMEType": "text/plain",
+                "Body": data_b64,
+                "BodyKey": {
+                    "Key": session_key_b64,
+                    "Algorithm": "aes256",
+                },
+            }
+            # Per-attachment session keys so the server can ship them as
+            # plaintext MIME parts to non-Proton recipients.
+            if uploaded_atts:
+                attachment_keys: dict[str, dict[str, str]] = {}
+                for att_id, att_key_b64 in uploaded_atts:
+                    att_sk, _ = self._key_ring.decrypt_session_key(att_key_b64)
+                    attachment_keys[att_id] = {
+                        "Key": base64.b64encode(att_sk).decode(),
                         "Algorithm": "aes256",
-                    },
-                }
-            )
+                    }
+                ext_pkg["AttachmentKeys"] = attachment_keys
+            packages.append(ext_pkg)
 
         # Send (delete draft on failure to avoid orphaned drafts)
         try:
