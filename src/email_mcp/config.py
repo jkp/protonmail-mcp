@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     )
     embed_skip_domains: str = "amazon.co.uk,ebay.com"
 
+    # When True (default), if a Together API embed call fails the embedder
+    # falls back to the local sentence-transformers model so progress
+    # continues. Slow is acceptable; stalled is not.
+    embed_local_fallback: bool = True
+
     @property
     def embed_skip_senders_list(self) -> list[str]:
         return [s.strip() for s in self.embed_skip_senders.split(",") if s.strip()]

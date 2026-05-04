@@ -95,6 +95,7 @@ class Embedder:
         api_key: str = "",
         skip_senders: list[str] | None = None,
         skip_domains: list[str] | None = None,
+        local_fallback: bool = True,
     ) -> None:
         self._db = db
         self._model_name = model_name
@@ -103,6 +104,7 @@ class Embedder:
         self._reranker = None  # Lazy-load on first search
         self._skip_senders = [s.lower() for s in (skip_senders or [])]
         self._skip_domains = [d.lower() for d in (skip_domains or [])]
+        self._local_fallback = local_fallback
         self._ensure_table()
 
     def _should_skip(self, sender_email: str | None) -> bool:
@@ -292,14 +294,22 @@ class Embedder:
                     all_vectors.append(self._encode_via_api(batch))
                 vectors = np.concatenate(all_vectors)
             except Exception as e:
-                # Don't fall back to local for large batches — it'll
-                # grind the CPU for ages. Just skip and retry next cycle.
-                logger.warning(
-                    "embedder.api_failed_skipping",
-                    error=str(e),
-                    chunks=len(all_texts),
-                )
-                return 0
+                if self._local_fallback:
+                    # Slow is acceptable; stalled is not. Local CPU encode
+                    # keeps progress moving while the API outage clears.
+                    logger.warning(
+                        "embedder.api_fallback_local",
+                        error=str(e),
+                        chunks=len(all_texts),
+                    )
+                    vectors = self._encode_local(all_texts)
+                else:
+                    logger.warning(
+                        "embedder.api_failed_skipping",
+                        error=str(e),
+                        chunks=len(all_texts),
+                    )
+                    return 0
         else:
             vectors = self._encode_local(all_texts)
 
@@ -474,9 +484,7 @@ class Embedder:
 
         sql = (
             "UPDATE messages SET embedded = -1"
-            " WHERE embedded = 0 AND ("
-            + " OR ".join(clauses)
-            + ")"
+            " WHERE embedded = 0 AND (" + " OR ".join(clauses) + ")"
         )
         cur = self._db.execute(sql, params)
         self._db.commit()

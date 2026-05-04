@@ -148,9 +148,7 @@ class TestSkipFilter:
             model=mock_model,
             skip_senders=["notifications@github.com"],
         )
-        _insert_message(
-            db, "pm-1", sender_email="notifications@github.com", body="PR opened"
-        )
+        _insert_message(db, "pm-1", sender_email="notifications@github.com", body="PR opened")
         emb.embed_batch(["pm-1"])
         row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
         assert row[0] == -1
@@ -182,9 +180,7 @@ class TestSkipFilter:
         _insert_message(db, "pm-1", sender_email="Notifications@GitHub.com", body="x")
         _insert_message(db, "pm-2", sender_email="seller@Ebay.com", body="y")
         emb.embed_batch(["pm-1", "pm-2"])
-        rows = db.execute(
-            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
-        ).fetchall()
+        rows = db.execute("SELECT pm_id, embedded FROM messages ORDER BY pm_id").fetchall()
         assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1}
 
     def test_non_matching_sender_still_embedded(self, db, mock_model):
@@ -223,9 +219,7 @@ class TestMarkSkippedExisting:
         n = emb.mark_skipped_existing()
 
         assert n == 2
-        rows = db.execute(
-            "SELECT pm_id, embedded FROM messages ORDER BY pm_id"
-        ).fetchall()
+        rows = db.execute("SELECT pm_id, embedded FROM messages ORDER BY pm_id").fetchall()
         assert {r[0]: r[1] for r in rows} == {"pm-1": -1, "pm-2": -1, "pm-3": 0}
 
     def test_marks_glob_pattern_rows(self, db, mock_model):
@@ -238,8 +232,7 @@ class TestMarkSkippedExisting:
 
         assert n == 2
         embedded = {
-            r[0]: r[1]
-            for r in db.execute("SELECT pm_id, embedded FROM messages").fetchall()
+            r[0]: r[1] for r in db.execute("SELECT pm_id, embedded FROM messages").fetchall()
         }
         assert embedded["pm-1"] == -1
         assert embedded["pm-2"] == -1
@@ -279,6 +272,112 @@ class TestMarkSkippedExisting:
         assert n == 0
         row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
         assert row[0] == 1
+
+
+class TestApiLocalFallback:
+    """Behavior when Together API fails mid-batch."""
+
+    def _capture_logs(self, monkeypatch):
+        """Replace embedder.logger.warning with a list collector."""
+        import email_mcp.embedder as emb_mod
+
+        events: list[tuple[str, dict]] = []
+
+        def _capture(event: str, **kwargs):
+            events.append((event, kwargs))
+
+        monkeypatch.setattr(emb_mod.logger, "warning", _capture)
+        return events
+
+    def test_falls_back_to_local_when_api_fails(self, db, mock_model, monkeypatch):
+        emb = Embedder(db=db, model=mock_model, api_key="k", local_fallback=True)
+
+        def boom(_texts):
+            raise RuntimeError("Together API: 401 invalid key")
+
+        monkeypatch.setattr(emb, "_encode_via_api", boom)
+        events = self._capture_logs(monkeypatch)
+
+        _insert_message(db, "pm-1", body="hello world")
+        n = emb.embed_batch(["pm-1"], use_api=True)
+
+        assert n == 1
+        assert db.messages.get("pm-1").embedded is True
+        rows = db.execute("SELECT chunk_id FROM message_vectors").fetchall()
+        assert len(rows) == 1
+        assert any(name == "embedder.api_fallback_local" for name, _ in events)
+        assert not any(name == "embedder.api_failed_skipping" for name, _ in events)
+
+    def test_no_fallback_when_disabled(self, db, mock_model, monkeypatch):
+        emb = Embedder(db=db, model=mock_model, api_key="k", local_fallback=False)
+
+        def boom(_texts):
+            raise RuntimeError("Together API: 401 invalid key")
+
+        monkeypatch.setattr(emb, "_encode_via_api", boom)
+
+        local_calls: list[list[str]] = []
+        original_local = emb._encode_local
+
+        def _track_local(texts):
+            local_calls.append(texts)
+            return original_local(texts)
+
+        monkeypatch.setattr(emb, "_encode_local", _track_local)
+        events = self._capture_logs(monkeypatch)
+
+        _insert_message(db, "pm-1", body="hello world")
+        n = emb.embed_batch(["pm-1"], use_api=True)
+
+        assert n == 0
+        assert local_calls == []
+        row = db.execute("SELECT embedded FROM messages WHERE pm_id = 'pm-1'").fetchone()
+        assert row[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM message_vectors").fetchone()[0] == 0
+        assert any(name == "embedder.api_failed_skipping" for name, _ in events)
+
+    def test_no_fallback_on_api_success(self, db, mock_model, monkeypatch):
+        """When API succeeds, _encode_local is never touched even if flag is on."""
+        emb = Embedder(db=db, model=mock_model, api_key="k", local_fallback=True)
+
+        from email_mcp.embedder import _EMBEDDING_DIMS
+
+        def fake_api(texts):
+            return np.zeros((len(texts), _EMBEDDING_DIMS), dtype=np.float32)
+
+        local_calls: list[list[str]] = []
+
+        def _track_local(texts):
+            local_calls.append(texts)
+            raise AssertionError("local encode must not be called on API success")
+
+        monkeypatch.setattr(emb, "_encode_via_api", fake_api)
+        monkeypatch.setattr(emb, "_encode_local", _track_local)
+
+        _insert_message(db, "pm-1", body="hello world")
+        n = emb.embed_batch(["pm-1"], use_api=True)
+
+        assert n == 1
+        assert local_calls == []
+
+    def test_local_only_mode_unchanged(self, db, mock_model, monkeypatch):
+        """No API key → always local, regardless of flag, and API path never invoked."""
+        api_calls: list[list[str]] = []
+
+        def _track_api(texts):
+            api_calls.append(texts)
+            raise AssertionError("API must not be called without a key")
+
+        for flag in (True, False):
+            emb = Embedder(db=db, model=mock_model, api_key="", local_fallback=flag)
+            monkeypatch.setattr(emb, "_encode_via_api", _track_api)
+            pm_id = f"pm-flag-{flag}"
+            _insert_message(db, pm_id, body=f"body for {flag}")
+            n = emb.embed_batch([pm_id], use_api=True)
+            assert n == 1
+            assert db.messages.get(pm_id).embedded is True
+
+        assert api_calls == []
 
 
 class TestUnembeddedQuery:
