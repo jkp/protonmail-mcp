@@ -79,6 +79,7 @@ All env vars use `EMAIL_MCP_` prefix:
 - `EMAIL_MCP_INBOX_SYNC_INTERVAL`, `EMAIL_MCP_NIGHTLY_SYNC_HOUR`, `EMAIL_MCP_NIGHTLY_SYNC_ENABLED`
 - `EMAIL_MCP_IDLE_ENABLED`, `EMAIL_MCP_REINDEX_DEBOUNCE`
 - `EMAIL_MCP_EMBED_SKIP_SENDERS`, `EMAIL_MCP_EMBED_SKIP_DOMAINS` — comma-separated. Senders may be exact or glob (`noreply@*`). Matching messages get `embedded=-1` (FTS still indexes them). Defaults skip GitHub/PayPal/Amazon/eBay/no-reply* mail.
+- `EMAIL_MCP_EMBED_LOCAL_FALLBACK` — bool, default `true`. When the Together API embed call fails, fall back to the local sentence-transformers model so progress continues. Set to `false` to skip the batch and retry next cycle instead.
 
 ## Prerequisites (external)
 

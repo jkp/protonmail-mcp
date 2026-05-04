@@ -257,6 +257,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 api_key=settings.together_api_key,
                 skip_senders=settings.embed_skip_senders_list,
                 skip_domains=settings.embed_skip_domains_list,
+                local_fallback=settings.embed_local_fallback,
             )
             import email_mcp.tools.searching as searching_mod
 
