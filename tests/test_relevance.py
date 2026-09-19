@@ -156,6 +156,41 @@ class TestScoreRelevanceRaw:
 
         assert await score_relevance_raw("q", _make_results(3), api_key="") is None
 
+    async def test_batches_large_result_sets(self) -> None:
+        """The model miscounts past ~40 results, so split and concatenate."""
+        from email_mcp.relevance import score_relevance_raw
+
+        sizes: list[int] = []
+
+        async def fake(prompt, api_key, count):
+            sizes.append(count)
+            return [5] * count
+
+        with patch("email_mcp.relevance._llm_score", new_callable=AsyncMock, side_effect=fake):
+            scores = await score_relevance_raw("q", _make_results(68), api_key="k")
+
+        assert scores is not None
+        assert len(scores) == 68
+        assert sizes == [30, 30, 8]
+
+    async def test_returns_none_when_a_batch_miscounts(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        async def fake(prompt, api_key, count):
+            return [5] * (count - 1)  # always one short
+
+        with patch("email_mcp.relevance._llm_score", new_callable=AsyncMock, side_effect=fake):
+            assert await score_relevance_raw("q", _make_results(68), api_key="k") is None
+
+    async def test_returns_none_when_a_batch_raises(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        async def fake(prompt, api_key, count):
+            raise TimeoutError
+
+        with patch("email_mcp.relevance._llm_score", new_callable=AsyncMock, side_effect=fake):
+            assert await score_relevance_raw("q", _make_results(68), api_key="k") is None
+
 
 class TestApplyRelevanceFilter:
     """The parallel path filters using scores it already has, not a second call."""

@@ -9,6 +9,8 @@ Results below the threshold are filtered out.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import structlog
 
@@ -17,6 +19,12 @@ logger = structlog.get_logger(__name__)
 _MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 _API_URL = "https://api.together.xyz/v1/chat/completions"
 _RELEVANCE_THRESHOLD = 3
+
+# The model loses count when asked for one score per result much past this.
+# Measured exact at 20/25/30/40 results, but 45 came back with 46 numbers —
+# which fails the length check and silently disables the whole filter. Batches
+# are dispatched together, so this costs one round trip rather than several.
+_RELEVANCE_BATCH_SIZE = 30
 
 _SYSTEM_PROMPT = """\
 You are a search relevance judge. Given a search query and a list of email \
@@ -54,20 +62,29 @@ async def score_relevance_raw(query: str, results: list[dict], api_key: str) -> 
     if not api_key or not results:
         return None
 
-    try:
-        scores = await _llm_score(_build_prompt(query, results), api_key, len(results))
-    except Exception as e:
-        # ReadTimeout stringifies to "", which made these undiagnosable.
-        logger.warning("relevance.score_failed", error=f"{type(e).__name__}: {e}")
-        return None
+    batches = [
+        results[i : i + _RELEVANCE_BATCH_SIZE]
+        for i in range(0, len(results), _RELEVANCE_BATCH_SIZE)
+    ]
+    responses = await asyncio.gather(
+        *(_llm_score(_build_prompt(query, b), api_key, len(b)) for b in batches),
+        return_exceptions=True,
+    )
 
-    if not scores or len(scores) != len(results):
-        logger.warning(
-            "relevance.score_mismatch",
-            expected=len(results),
-            got=len(scores) if scores else 0,
-        )
-        return None
+    scores: list[int] = []
+    for batch, got in zip(batches, responses):
+        if isinstance(got, BaseException):
+            # ReadTimeout stringifies to "", which made these undiagnosable.
+            logger.warning("relevance.score_failed", error=f"{type(got).__name__}: {got}")
+            return None
+        if not got or len(got) != len(batch):
+            logger.warning(
+                "relevance.score_mismatch",
+                expected=len(batch),
+                got=len(got) if got else 0,
+            )
+            return None
+        scores.extend(got)
 
     return scores
 
