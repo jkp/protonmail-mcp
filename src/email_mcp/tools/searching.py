@@ -326,6 +326,18 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                     m for m in guaranteed if m.pm_id not in {msg.pm_id for msg in soft_candidates}
                 ]
                 all_candidates = soft_candidates + guaranteed_only
+
+                # Collapse thread replies and repeated templates BEFORE reranking.
+                # Dedup discards ~70% of candidates (150 -> 44 in production) and
+                # the cross-encoder is by far the most expensive stage, so most of
+                # what it was scoring got thrown away moments later. Candidates
+                # arrive recall-best-first, so first-seen wins exactly as it did
+                # when this ran after the rerank.
+                pool = len(all_candidates)
+                all_candidates = [
+                    m for _, m in _dedup_conversations([(0.0, m) for m in all_candidates])
+                ]
+
                 scored = await asyncio.to_thread(
                     _embedder.score, parsed.raw_fts_terms, all_candidates, db
                 )
@@ -334,6 +346,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                 logger.info(
                     "tool.search.reranked",
                     candidates=len(all_candidates),
+                    pool=pool,
                     guaranteed=len(guaranteed_only),
                     top_score=f"{top_score:.2f}",
                 )
@@ -341,7 +354,6 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                 # No cross-encoder threshold — vector distance already filtered
                 # gross noise. Reranker orders; we just take top limit.
                 scored = apply_bulk_penalty(parsed.raw_fts_terms, scored, db)
-                scored = _dedup_conversations(scored)
                 results = [msg for _, msg in scored][:limit]
             except Exception as e:
                 logger.warning("tool.search.rerank_error", error=str(e))
