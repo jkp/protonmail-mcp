@@ -96,6 +96,7 @@ class Embedder:
         api_key: str = "",
         hf_api_key: str = "",
         embedding_api_url: str = "",
+        rerank_api_url: str = "",
         skip_senders: list[str] | None = None,
         skip_domains: list[str] | None = None,
         local_fallback: bool = True,
@@ -105,6 +106,7 @@ class Embedder:
         self._together_key = api_key
         self._hf_key = hf_api_key
         self._embedding_api_url = embedding_api_url
+        self._rerank_api_url = rerank_api_url
         self._local_model = model  # None = lazy-load on first search
         self._reranker = None  # Lazy-load on first search
         self._skip_senders = [s.lower() for s in (skip_senders or [])]
@@ -208,20 +210,23 @@ class Embedder:
         return _call()
 
     def warmup(self) -> None:
-        """Pre-load both the embedding model and reranker.
+        """Pre-load local models — but skip any the HF endpoints have replaced.
 
-        Called from a background task at startup so the first search
-        doesn't pay the ~10s loading cost.
+        The router serves both the embedder and the reranker, so loading
+        ~4.6GB of local weights just to sit idle is waste. They load lazily
+        if an API call ever fails.
         """
-        from sentence_transformers import CrossEncoder
-
-        if self._local_model is None:
+        use_hf_embed = bool(self._hf_key and self._embedding_api_url)
+        use_hf_rerank = bool(self._hf_key and self._rerank_api_url)
+        if self._local_model is None and not use_hf_embed:
             logger.info("embedder.warmup.embedding_model")
             self._local_model = self._load_local_model(self._model_name)
-        if self._reranker is None:
+        if self._reranker is None and not use_hf_rerank:
+            from sentence_transformers import CrossEncoder
+
             logger.info("embedder.warmup.reranker")
             self._reranker = CrossEncoder(_RERANKER_MODEL)
-        logger.info("embedder.warmup.done")
+        logger.info("embedder.warmup.done", hf_embed=use_hf_embed, hf_rerank=use_hf_rerank)
 
     def _encode_local(self, texts: list[str]) -> np.ndarray:
         """Encode texts using local model. Lazy-loads on first call."""
@@ -488,13 +493,62 @@ class Embedder:
             pairs.append([query, doc])
         return pairs
 
+    def _rerank_via_hf(self, pairs: list[list[str]]) -> np.ndarray:
+        """Score (query, document) pairs via the HF text-ranking endpoint.
+
+        Identical BAAI/bge-reranker-v2-m3 weights to the local cross-encoder,
+        but ~0.3s for a whole candidate set instead of ~8s per candidate on
+        four CPU threads. Returns one score per pair, in input order.
+        """
+        import httpx
+        from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+        @retry(
+            retry=retry_if_exception(self._is_retryable),
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=1, max=10),
+            before_sleep=lambda rs: logger.warning(
+                "embedder.rerank_retry", attempt=rs.attempt_number
+            ),
+        )
+        def _call() -> np.ndarray:
+            resp = httpx.post(
+                self._rerank_api_url,
+                headers={"Authorization": f"Bearer {self._hf_key}"},
+                json={"inputs": pairs},
+                timeout=120,
+            )
+            if resp.status_code in (429, 502, 503, 504):
+                raise RuntimeError(f"retryable: {resp.status_code}")
+            if resp.status_code != 200:
+                raise RuntimeError(f"HF rerank {resp.status_code}: {resp.text[:200]}")
+            scores = resp.json()["scores"]
+            # A single pair comes back as a bare float rather than a list.
+            if isinstance(scores, (int, float)):
+                scores = [scores]
+            return np.array(scores, dtype=np.float32)
+
+        return _call()
+
     def score(self, query: str, candidates: list, db: Any) -> list[tuple[float, Any]]:
         """Score candidates using cross-encoder. Returns (score, msg) sorted by score desc."""
         if not candidates:
             return []
+        pairs = self._build_pairs(query, candidates, db)
+
+        if self._hf_key and self._rerank_api_url:
+            try:
+                scores = self._rerank_via_hf(pairs)
+                return sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+            except Exception:
+                # Deliberately NOT falling back to the local cross-encoder:
+                # it costs minutes per search, which is far worse than keeping
+                # the recall order. Ordering degrades, the search still returns.
+                logger.warning("embedder.rerank_fallback_order", exc_info=True)
+                return [(float(len(candidates) - i), m) for i, m in enumerate(candidates)]
+
         self._ensure_reranker()
         assert self._reranker is not None
-        pairs = self._build_pairs(query, candidates, db)
         scores = self._reranker.predict(pairs)
         return sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
 

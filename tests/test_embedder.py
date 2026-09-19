@@ -191,6 +191,63 @@ class TestQueryEncoding:
         assert e._encode_via_hf.call_args[0][0] == ["query: benson"]
 
 
+class TestReranking:
+    """The cross-encoder runs on HF: same weights, ~0.3s instead of ~8s/candidate."""
+
+    HF_KW = {"hf_api_key": "hf_test", "rerank_api_url": "https://hf.test/rank"}
+
+    def _candidates(self, db, n=3):
+        for i in range(n):
+            _insert_message(db, f"m{i}", subject=f"Subject {i}", body=f"body number {i}")
+        return [db.messages.get(f"m{i}") for i in range(n)]
+
+    def test_score_uses_hf_rerank(self, db, mock_model):
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._rerank_via_hf = MagicMock(return_value=np.array([0.1, 0.9, 0.5], dtype=np.float32))
+        e._ensure_reranker = MagicMock()
+        out = e.score("q", self._candidates(db), db)
+        assert [m.pm_id for _, m in out] == ["m1", "m2", "m0"]
+        e._ensure_reranker.assert_not_called()
+
+    def test_score_falls_back_to_recall_order_on_api_failure(self, db, mock_model):
+        """Must NOT reach for the local cross-encoder: it stalls for minutes."""
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._rerank_via_hf = MagicMock(side_effect=RuntimeError("503"))
+        e._ensure_reranker = MagicMock()
+        out = e.score("q", self._candidates(db), db)
+        assert [m.pm_id for _, m in out] == ["m0", "m1", "m2"]
+        e._ensure_reranker.assert_not_called()
+
+    def test_score_uses_local_reranker_without_hf_key(self, db, mock_model):
+        e = Embedder(db=db, model=mock_model)
+        e._reranker = MagicMock()
+        e._reranker.predict.return_value = np.array([0.2, 0.8], dtype=np.float32)
+        out = e.score("q", self._candidates(db, 2), db)
+        assert [m.pm_id for _, m in out] == ["m1", "m0"]
+
+    def test_rerank_via_hf_handles_scalar_score(self, db, mock_model, monkeypatch):
+        """A single pair comes back as a bare float, not a list."""
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"scores": 0.42}
+        monkeypatch.setattr("httpx.post", lambda *a, **k: resp)
+        assert e._rerank_via_hf([["q", "d"]]).tolist() == pytest.approx([0.42])
+
+    def test_warmup_skips_local_models_when_hf_configured(self, db, mock_model):
+        """No point loading ~4.6GB of weights the router already serves."""
+        e = Embedder(
+            db=db,
+            model=None,
+            hf_api_key="hf_test",
+            embedding_api_url="https://hf.test/embed",
+            rerank_api_url="https://hf.test/rank",
+        )
+        e._load_local_model = MagicMock(side_effect=AssertionError("should not load"))
+        e.warmup()
+        assert e._local_model is None
+        assert e._reranker is None
+
+
 class TestSkipFilter:
     def test_exact_sender_match_skipped(self, db, mock_model):
         emb = Embedder(

@@ -73,14 +73,23 @@ class Settings(BaseSettings):
     together_api_key: str = ""
 
     # Hugging Face Inference Providers token + endpoint, used for bulk embed
-    # backfill. Query-time encoding stays local; this keeps the CPU free so
-    # search stays responsive while the backlog drains. The HF router serves
-    # the exact same intfloat/multilingual-e5-large-instruct model, so vectors
-    # stay compatible (same 1024 dims, no re-embed).
+    # backfill and query encoding. The HF router serves the exact same
+    # intfloat/multilingual-e5-large-instruct model, so vectors stay
+    # compatible (same 1024 dims, no re-embed) at ~0.2s instead of ~4.8s on
+    # local CPU. The local model stays the fallback if the API fails.
     hf_api_key: str = ""
     embedding_api_url: str = (
         "https://router.huggingface.co/hf-inference/models/"
         "intfloat/multilingual-e5-large-instruct/pipeline/feature-extraction"
+    )
+
+    # Same story for the cross-encoder reranker: the router serves the
+    # identical BAAI/bge-reranker-v2-m3, but CPU inference costs ~8s per
+    # candidate (568M params on 4 threads), turning every free-text search
+    # into a multi-minute wait.
+    rerank_api_url: str = (
+        "https://router.huggingface.co/hf-inference/models/"
+        "BAAI/bge-reranker-v2-m3/pipeline/text-ranking"
     )
 
     # Senders/domains to skip when embedding. FTS still indexes these — we just
