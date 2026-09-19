@@ -47,7 +47,7 @@ _QUERY_PREFIX = "query: "
 # noise for relevance. Subject + the opening lines carry the signal. Measured
 # on the real corpus: 2000 chars cost ~21s per search, 300 chars ~3.6s, with
 # no loss of the semantic matching bge-reranker-v2-m3 was picked for.
-_RERANK_BODY_CHARS = 300
+_RERANK_BODY_CHARS = 150
 _DOC_PREFIX = "passage: "
 _RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 

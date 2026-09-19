@@ -47,6 +47,13 @@ _PROMO_QUERY_TERMS = frozenset(
     }
 )
 
+# How many distinct candidates to send through the cross-encoder. Reranking is
+# the dominant cost (~0.08s each) and the pool grows with `limit`, so a
+# 50-result request would otherwise score ~45 items to order a list nobody
+# reads that far down. Everything past this stays in recall order behind the
+# reranked head, so no candidate is dropped from the response.
+_RERANK_MAX_CANDIDATES = 30
+
 
 def is_promotional(body: str) -> bool:
     """Return True if the email body contains promotional unsubscribe markers."""
@@ -338,14 +345,25 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                     m for _, m in _dedup_conversations([(0.0, m) for m in all_candidates])
                 ]
 
-                scored = await asyncio.to_thread(
-                    _embedder.score, parsed.raw_fts_terms, all_candidates, db
-                )
+                # The cross-encoder dominates search latency and scales with the
+                # candidate count, which grows with `limit` (a 50-result client
+                # asks produce ~45 distinct candidates). Score a bounded head and
+                # leave the remainder in recall order beneath every reranked hit:
+                # the head is what actually gets read, and the result count the
+                # caller asked for is preserved.
+                head = all_candidates[:_RERANK_MAX_CANDIDATES]
+                tail = all_candidates[_RERANK_MAX_CANDIDATES:]
+
+                scored = await asyncio.to_thread(_embedder.score, parsed.raw_fts_terms, head, db)
+                if tail:
+                    floor = min((s for s, _ in scored), default=0.0) - 1.0
+                    scored = scored + [(floor - i, m) for i, m in enumerate(tail)]
 
                 top_score = scored[0][0] if scored else 0.0
                 logger.info(
                     "tool.search.reranked",
-                    candidates=len(all_candidates),
+                    candidates=len(head),
+                    tail=len(tail),
                     pool=pool,
                     guaranteed=len(guaranteed_only),
                     top_score=f"{top_score:.2f}",
