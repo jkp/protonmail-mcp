@@ -1,5 +1,6 @@
 """Search tool using FTS5 + semantic vector search."""
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -251,14 +252,17 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         if _embedder:
             try:
                 if parsed.where_clauses:
-                    vector_pm_ids = _embedder.search_with_filters(
+                    vector_pm_ids = await asyncio.to_thread(
+                        _embedder.search_with_filters,
                         parsed.raw_fts_terms,
-                        where_clause=parsed.where,
-                        params=parsed.params,
-                        limit=limit,
+                        parsed.where,
+                        parsed.params,
+                        limit,
                     )
                 else:
-                    vector_pm_ids = _embedder.search(parsed.raw_fts_terms, limit=limit)
+                    vector_pm_ids = await asyncio.to_thread(
+                        _embedder.search, parsed.raw_fts_terms, limit
+                    )
 
                 for pm_id in vector_pm_ids:
                     msg = db.messages.get(pm_id)
@@ -273,7 +277,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         # Phase 2: FTS5 prefix match — always runs, over-fetch to avoid date-truncation
         sql, params = parsed.to_sql(limit=limit * 3, offset=offset)
         try:
-            rows = db.execute(sql, params).fetchall()
+            rows = await asyncio.to_thread(lambda: db.execute(sql, params).fetchall())
             for row in rows:
                 msg = _row_to_message(row)
                 if msg.pm_id not in seen_pm_ids:
@@ -301,9 +305,10 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                 LIMIT ?
             """
             try:
-                subj_rows = db.execute(
-                    subj_sql, [*like_params, *parsed.params, limit * 2]
-                ).fetchall()
+                subj_params = [*like_params, *parsed.params, limit * 2]
+                subj_rows = await asyncio.to_thread(
+                    lambda: db.execute(subj_sql, subj_params).fetchall()
+                )
                 for row in subj_rows:
                     msg = _row_to_message(row)
                     guaranteed.append(msg)
@@ -321,7 +326,9 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                     m for m in guaranteed if m.pm_id not in {msg.pm_id for msg in soft_candidates}
                 ]
                 all_candidates = soft_candidates + guaranteed_only
-                scored = _embedder.score(parsed.raw_fts_terms, all_candidates, db)
+                scored = await asyncio.to_thread(
+                    _embedder.score, parsed.raw_fts_terms, all_candidates, db
+                )
 
                 top_score = scored[0][0] if scored else 0.0
                 logger.info(
@@ -346,7 +353,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         # No free text — just hard filters, date-sorted
         sql, params = parsed.to_sql(limit=limit, offset=offset)
         try:
-            rows = db.execute(sql, params).fetchall()
+            rows = await asyncio.to_thread(lambda: db.execute(sql, params).fetchall())
             results = [_row_to_message(r) for r in rows]
         except Exception as e:
             logger.warning("tool.search.filter_error", error=str(e))

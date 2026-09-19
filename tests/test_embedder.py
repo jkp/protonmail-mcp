@@ -404,3 +404,49 @@ class TestUnembeddedQuery:
 
         unembedded = embedder.get_unembedded(limit=10)
         assert unembedded == []
+
+
+class TestHFEncode:
+    """HF Inference Providers returns raw vectors, unlike the OpenAI shape."""
+
+    def _resp(self, payload):
+        class _Resp:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return payload
+
+        return _Resp()
+
+    def test_batch_response_shapes_correctly(self, db, mock_model, monkeypatch):
+        import httpx
+
+        emb = Embedder(db=db, model=mock_model, hf_api_key="hf_test")
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: self._resp([[0.1] * 1024, [0.2] * 1024]))
+
+        out = emb._encode_via_hf(["a", "b"])
+        assert out.shape == (2, 1024)
+
+    def test_single_flat_vector_is_wrapped(self, db, mock_model, monkeypatch):
+        import httpx
+
+        emb = Embedder(db=db, model=mock_model, hf_api_key="hf_test")
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: self._resp([0.1] * 1024))
+
+        out = emb._encode_via_hf(["a"])
+        assert out.shape == (1, 1024)
+
+    def test_bulk_backfill_prefers_hf_when_key_present(self, db, mock_model, monkeypatch):
+        emb = Embedder(db=db, model=mock_model, api_key="together", hf_api_key="hf_test")
+        calls = {"hf": 0}
+
+        def fake_hf(texts):
+            calls["hf"] += 1
+            return np.zeros((len(texts), 1024), dtype=np.float32)
+
+        monkeypatch.setattr(emb, "_encode_via_hf", fake_hf)
+        _insert_message(db, "pm-1", body="Hello")
+
+        emb.embed_batch(["pm-1"], use_api=True)
+        assert calls["hf"] == 1

@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     # Embedding API (optional — local model used as fallback)
     together_api_key: str = ""
 
+    # Hugging Face Inference Providers token + endpoint, used for bulk embed
+    # backfill. Query-time encoding stays local; this keeps the CPU free so
+    # search stays responsive while the backlog drains. The HF router serves
+    # the exact same intfloat/multilingual-e5-large-instruct model, so vectors
+    # stay compatible (same 1024 dims, no re-embed).
+    hf_api_key: str = ""
+    embedding_api_url: str = (
+        "https://router.huggingface.co/hf-inference/models/"
+        "intfloat/multilingual-e5-large-instruct/pipeline/feature-extraction"
+    )
+
     # Senders/domains to skip when embedding. FTS still indexes these — we just
     # don't pay the embedding cost for high-volume notification mail.
     # Comma-separated. Senders may be exact ("foo@bar.com") or glob ("noreply@*").

@@ -29,7 +29,8 @@ _BATCH_SIZE = 64
 _CHUNK_CHARS = 400
 _CHUNK_OVERLAP = 100  # Overlap between chunks to avoid splitting mid-sentence
 _MAX_CHUNKS_PER_MSG = 5  # Cap chunks — first few have the most signal
-_API_BATCH_SIZE = 100  # Max texts per Together API call
+_API_BATCH_SIZE = 100  # Max texts per OpenAI-compatible API call
+_HF_BATCH_SIZE = 16  # Conservative batch for HF Inference Providers
 
 
 def _serialize_f32(vector: np.ndarray) -> bytes:
@@ -93,6 +94,8 @@ class Embedder:
         model: Any = None,
         model_name: str = _DEFAULT_MODEL,
         api_key: str = "",
+        hf_api_key: str = "",
+        embedding_api_url: str = "",
         skip_senders: list[str] | None = None,
         skip_domains: list[str] | None = None,
         local_fallback: bool = True,
@@ -100,6 +103,8 @@ class Embedder:
         self._db = db
         self._model_name = model_name
         self._together_key = api_key
+        self._hf_key = hf_api_key
+        self._embedding_api_url = embedding_api_url
         self._local_model = model  # None = lazy-load on first search
         self._reranker = None  # Lazy-load on first search
         self._skip_senders = [s.lower() for s in (skip_senders or [])]
@@ -138,6 +143,41 @@ class Embedder:
     @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
         return isinstance(exc, RuntimeError) and "retryable" in str(exc)
+
+    def _encode_via_hf(self, texts: list[str]) -> np.ndarray:
+        """Encode texts via Hugging Face Inference Providers (TEI).
+
+        Returns the raw feature-extraction vectors: a list of N 1024-float
+        vectors for N inputs. Identical model to the local one, so the
+        resulting vectors are interchangeable with the existing index.
+        """
+        import httpx
+        from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+        @retry(
+            retry=retry_if_exception(self._is_retryable),
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=1, max=10),
+            before_sleep=lambda rs: logger.warning("embedder.hf_retry", attempt=rs.attempt_number),
+        )
+        def _call() -> np.ndarray:
+            resp = httpx.post(
+                self._embedding_api_url,
+                headers={"Authorization": f"Bearer {self._hf_key}"},
+                json={"inputs": texts, "options": {"wait_for_model": True}},
+                timeout=120,
+            )
+            if resp.status_code in (429, 502, 503, 504):
+                raise RuntimeError(f"retryable: {resp.status_code}")
+            if resp.status_code != 200:
+                raise RuntimeError(f"HF API {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            # Single input returns one flat vector; batch returns list of vectors.
+            if data and isinstance(data[0], (int, float)):
+                data = [data]
+            return np.array(data, dtype=np.float32)
+
+        return _call()
 
     def _encode_via_api(self, texts: list[str]) -> np.ndarray:
         """Encode texts using Together API with retry on transient errors."""
@@ -285,13 +325,15 @@ class Embedder:
             return 0
 
         # Encode chunks (batched for API, unbatched for local)
-        if use_api and self._together_key:
+        if use_api and (self._hf_key or self._together_key):
             try:
                 # Send in sub-batches to stay within API limits
+                encoder = self._encode_via_hf if self._hf_key else self._encode_via_api
+                batch_size = _HF_BATCH_SIZE if self._hf_key else _API_BATCH_SIZE
                 all_vectors = []
-                for i in range(0, len(all_texts), _API_BATCH_SIZE):
-                    batch = all_texts[i : i + _API_BATCH_SIZE]
-                    all_vectors.append(self._encode_via_api(batch))
+                for i in range(0, len(all_texts), batch_size):
+                    batch = all_texts[i : i + batch_size]
+                    all_vectors.append(encoder(batch))
                 vectors = np.concatenate(all_vectors)
             except Exception as e:
                 if self._local_fallback:
@@ -380,8 +422,9 @@ class Embedder:
         vec = self._encode_local([f"{_QUERY_PREFIX}{query}"])
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
-        # Over-fetch chunks to account for dedup + filtering
-        k = limit * 10
+        # Over-fetch chunks to account for dedup + filtering. Kept modest:
+        # vec0 is brute-force, so k directly drives latency on a cold cache.
+        k = limit * 4
 
         vector_rows = self._db.execute(
             "SELECT chunk_id, distance FROM message_vectors"

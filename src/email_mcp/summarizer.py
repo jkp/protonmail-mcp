@@ -20,7 +20,7 @@ from email_mcp.db import Database
 
 logger = structlog.get_logger(__name__)
 
-_MODEL = "mistralai/Mistral-Small-24B-Instruct-2501"
+_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 _API_URL = "https://api.together.xyz/v1/chat/completions"
 _MAX_BODY_CHARS = 2000
 

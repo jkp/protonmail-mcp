@@ -255,6 +255,8 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             embedder = Embedder(
                 db=db,
                 api_key=settings.together_api_key,
+                hf_api_key=settings.hf_api_key,
+                embedding_api_url=settings.embedding_api_url,
                 skip_senders=settings.embed_skip_senders_list,
                 skip_domains=settings.embed_skip_domains_list,
                 local_fallback=settings.embed_local_fallback,
