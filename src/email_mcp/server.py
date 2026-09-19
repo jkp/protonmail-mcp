@@ -86,8 +86,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             logger.warning("server.api_check_failed", exc_info=True)
 
         # 4. Load PGP keys for message decryption (non-fatal)
-        decryptor: ProtonDecryptor | None = None
-        try:
+        async def _load_keys() -> ProtonDecryptor:
             session_data = json.loads(settings.proton_session_file.read_text())
             passphrase = session_data.get("mailbox_passphrase", "")
             if not passphrase:
@@ -126,14 +125,36 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                                 exc_info=True,
                             )
 
-            decryptor = ProtonDecryptor(api=api, key_ring=key_ring)
-            reading._decryptor = decryptor
+            loaded = ProtonDecryptor(api=api, key_ring=key_ring)
+            reading._decryptor = loaded
 
             # Wire up ProtonSender for composing tools
             from email_mcp.sender import ProtonSender
 
             composing._sender = ProtonSender(api=api, key_ring=key_ring)
             logger.info("server.keys_loaded", address_keys=len(addresses))
+            return loaded
+
+        # Retry transient failures (DNS/proxy blip at container start would
+        # otherwise disable body decryption until the next restart, since the
+        # process holds no keys once this block gives up). Permanent failures —
+        # missing passphrase or a dead session — break immediately.
+        decryptor: ProtonDecryptor | None = None
+        try:
+            for attempt in range(1, 6):
+                try:
+                    decryptor = await _load_keys()
+                    break
+                except (ValueError, AuthError):
+                    raise
+                except Exception:
+                    if attempt >= 5:
+                        raise
+                    delay = min(2**attempt, 30)
+                    logger.warning(
+                        "server.key_load_retry", attempt=attempt, delay=delay, exc_info=True
+                    )
+                    await asyncio.sleep(delay)
         except Exception:
             logger.warning(
                 "server.key_load_failed",
