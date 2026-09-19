@@ -145,3 +145,24 @@ class TestProtonKeyRing:
         kr = ProtonKeyRing(armored, passphrase)
         with pytest.raises(Exception):
             kr.decrypt("not a pgp message at all")
+
+    def test_decrypt_is_thread_safe(self, key_pair):
+        """Concurrent decrypts share one keyring (the indexer does this).
+
+        pgpy keys have mutable unlock state; before the lock was added, ~30%
+        of concurrent calls failed with DecryptionError even though the key
+        and ciphertext were valid.
+        """
+        import concurrent.futures
+
+        armored, passphrase = key_pair
+        kr = ProtonKeyRing(armored, passphrase)
+        encrypted = _encrypt_to_armored("concurrent secret", armored)
+
+        def one(_: int) -> str:
+            return kr.decrypt(encrypted)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(one, range(160)))
+
+        assert results == ["concurrent secret"] * 160

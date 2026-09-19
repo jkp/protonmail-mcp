@@ -128,8 +128,7 @@ class ProtonSender:
         pgp_msg = pgpy.PGPMessage.new(body_text)
 
         signing_key = self._key_ring.signing_key_for(from_email)
-        with signing_key.unlock(signing_key._passphrase):  # type: ignore[attr-defined]
-            pgp_msg |= signing_key.sign(pgp_msg)
+        pgp_msg |= self._key_ring.sign_message(signing_key, pgp_msg)
 
         encrypted = pub_key.encrypt(pgp_msg)
         armored = str(encrypted)
@@ -147,8 +146,7 @@ class ProtonSender:
 
         # Sign the plaintext
         pgp_msg = pgpy.PGPMessage.new(content, encoding=None)
-        with signing_key.unlock(signing_key._passphrase):  # type: ignore[attr-defined]
-            sig = signing_key.sign(pgp_msg)
+        sig = self._key_ring.sign_message(signing_key, pgp_msg)
 
         # Encrypt
         encrypted = pub_key.encrypt(pgp_msg)

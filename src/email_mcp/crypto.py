@@ -9,6 +9,7 @@ Handles the full decryption chain:
 from __future__ import annotations
 
 import base64
+import threading
 
 import bcrypt
 import pgpy
@@ -47,6 +48,12 @@ class ProtonKeyRing:
         kr = ProtonKeyRing(user_key_armored, passphrase)
         kr.add_address_key(addr_key_armored, encrypted_token)
         plaintext = kr.decrypt(encrypted_body)
+
+    Thread safety: pgpy keys carry mutable unlock state, so a single key object
+    cannot be unlocked/decrypted from two threads at once. The body indexer
+    calls decrypt() from a thread pool, which intermittently produced
+    "no available key could decrypt" errors (~30% of concurrent calls). Every
+    operation that touches key state is therefore serialized behind _lock.
     """
 
     def __init__(self, user_key_armored: str, passphrase: str) -> None:
@@ -56,6 +63,7 @@ class ProtonKeyRing:
             user_key_armored: Armored PGP private key from GET /core/v4/users.
             passphrase: Mailbox passphrase from derive_mailbox_passphrase().
         """
+        self._lock = threading.RLock()
         self._user_key = self._load_and_unlock(user_key_armored, passphrase)
         self._address_keys: list[pgpy.PGPKey] = []
         self._keys_by_email: dict[str, pgpy.PGPKey] = {}
@@ -79,11 +87,22 @@ class ProtonKeyRing:
             email: Email address this key belongs to (for signing key lookup).
         """
         # Decrypt the token using the user key to get the address key passphrase
-        token_passphrase = self._decrypt_with_key(self._user_key, encrypted_token)
-        addr_key = self._load_and_unlock(armored_key, token_passphrase)
-        self._address_keys.append(addr_key)
-        if email:
-            self._keys_by_email[email.lower()] = addr_key
+        with self._lock:
+            token_passphrase = self._decrypt_with_key(self._user_key, encrypted_token)
+            addr_key = self._load_and_unlock(armored_key, token_passphrase)
+            self._address_keys.append(addr_key)
+            if email:
+                self._keys_by_email[email.lower()] = addr_key
+
+    def sign_message(self, key: pgpy.PGPKey, message: pgpy.PGPMessage) -> pgpy.PGPSignature:
+        """Sign a message with the given private key.
+
+        Serialized with all other key use, since signing unlocks the same key
+        objects the decrypt path uses.
+        """
+        with self._lock:
+            with key.unlock(key._passphrase):  # type: ignore[attr-defined]
+                return key.sign(message)
 
     def decrypt(self, armored_pgp_message: str) -> str:
         """Decrypt a PGP-encrypted message body.
@@ -91,18 +110,19 @@ class ProtonKeyRing:
         Tries the user key first, then each address key.
         Raises DecryptionError if no key can decrypt.
         """
-        # Try user key first
-        try:
-            return self._decrypt_with_key(self._user_key, armored_pgp_message)
-        except Exception:
-            pass
-
-        # Try address keys
-        for addr_key in self._address_keys:
+        with self._lock:
+            # Try user key first
             try:
-                return self._decrypt_with_key(addr_key, armored_pgp_message)
+                return self._decrypt_with_key(self._user_key, armored_pgp_message)
             except Exception:
-                continue
+                pass
+
+            # Try address keys
+            for addr_key in self._address_keys:
+                try:
+                    return self._decrypt_with_key(addr_key, armored_pgp_message)
+                except Exception:
+                    continue
 
         raise DecryptionError("No available key could decrypt the message")
 
@@ -125,16 +145,17 @@ class ProtonKeyRing:
         """
         msg = pgpy.PGPMessage.from_blob(data)
 
-        for key in [self._user_key] + self._address_keys:
-            try:
-                with key.unlock(key._passphrase):  # type: ignore[attr-defined]
-                    decrypted = key.decrypt(msg)
-                result = decrypted.message
-                if isinstance(result, str):
-                    return result.encode("utf-8")
-                return bytes(result)
-            except Exception:
-                continue
+        with self._lock:
+            for key in [self._user_key] + self._address_keys:
+                try:
+                    with key.unlock(key._passphrase):  # type: ignore[attr-defined]
+                        decrypted = key.decrypt(msg)
+                    result = decrypted.message
+                    if isinstance(result, str):
+                        return result.encode("utf-8")
+                    return bytes(result)
+                except Exception:
+                    continue
 
         raise DecryptionError("No available key could decrypt the data")
 
@@ -149,19 +170,20 @@ class ProtonKeyRing:
         key_packets = base64.b64decode(key_packets_b64)
         msg = pgpy.PGPMessage.from_blob(key_packets)
 
-        for key in [self._user_key] + self._address_keys:
-            try:
-                with key.unlock(key._passphrase):  # type: ignore[attr-defined]
-                    # Extract the session key by decrypting the key packet
-                    sk = msg._sessionkeys[0]
-                    subkeys = list(key.subkeys.values())
-                    if subkeys:
-                        alg, session_key = sk.decrypt_sk(subkeys[0]._key)
-                    else:
-                        alg, session_key = sk.decrypt_sk(key._key)
-                    return session_key, msg
-            except Exception:
-                continue
+        with self._lock:
+            for key in [self._user_key] + self._address_keys:
+                try:
+                    with key.unlock(key._passphrase):  # type: ignore[attr-defined]
+                        # Extract the session key by decrypting the key packet
+                        sk = msg._sessionkeys[0]
+                        subkeys = list(key.subkeys.values())
+                        if subkeys:
+                            alg, session_key = sk.decrypt_sk(subkeys[0]._key)
+                        else:
+                            alg, session_key = sk.decrypt_sk(key._key)
+                        return session_key, msg
+                except Exception:
+                    continue
 
         raise DecryptionError("Could not decrypt session key")
 
