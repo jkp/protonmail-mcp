@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -144,16 +145,50 @@ class ProtonClient:
             self._uid = data.get("uid")
 
     def _save_session(self) -> None:
+        """Persist rotated tokens without discarding cached key material.
+
+        ``email-mcp-auth`` writes ``key_salts`` and ``mailbox_passphrase`` into
+        this same file. Proton only grants the ``locked`` scope (needed to call
+        ``/core/v4/keys/salts``) during a fresh password login, so that material
+        cannot be re-derived from a refreshed token — it has to be carried
+        forward verbatim. A plain overwrite here would destroy it on the first
+        token refresh and force a full 2FA re-auth after the next restart.
+
+        The write is atomic because the refresh token it holds is single-use: a
+        crash mid-write would strand the session with a consumed token.
+        """
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
-        self._session_path.write_text(
-            json.dumps(
-                {
-                    "access_token": self._access_token,
-                    "refresh_token": self._refresh_token,
-                    "uid": self._uid,
-                }
-            )
+
+        data: dict[str, Any] = {}
+        try:
+            existing = json.loads(self._session_path.read_text())
+            if isinstance(existing, dict):
+                data = existing
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError):
+            logger.warning("proton.session_unreadable_merge_skipped", exc_info=True)
+
+        data.update(
+            {
+                "access_token": self._access_token,
+                "refresh_token": self._refresh_token,
+                "uid": self._uid,
+            }
         )
+
+        tmp_path = self._session_path.with_name(self._session_path.name + ".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2))
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, self._session_path)
+
+    def _session_has_key_material(self) -> bool:
+        """True if the session file still carries the cached mailbox passphrase."""
+        try:
+            data = json.loads(self._session_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        return isinstance(data, dict) and bool(data.get("mailbox_passphrase"))
 
     # ── Low-level HTTP ────────────────────────────────────────────────────────
 
@@ -237,6 +272,20 @@ class ProtonClient:
             self._access_token = data["AccessToken"]
             self._refresh_token = data["RefreshToken"]
             self._save_session()
+
+            # A token refresh must never cost us the key material — losing it is
+            # invisible until the next restart, when decryption silently dies.
+            # Surface it immediately instead of discovering it at reboot.
+            if not self._session_has_key_material():
+                logger.error("proton.session_key_material_missing")
+                await self._ntfy_alert(
+                    "Email MCP: Key material lost",
+                    "A token refresh left the session file without "
+                    "mailbox_passphrase — body decryption will fail on the next "
+                    "restart. Re-run email-mcp-auth to restore it.",
+                    priority="urgent",
+                    tags="warning",
+                )
 
     # ── Alerts ────────────────────────────────────────────────────────────────
 

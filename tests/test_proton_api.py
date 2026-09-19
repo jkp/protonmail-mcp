@@ -1,5 +1,6 @@
 """Tests for the ProtonMail API client."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -50,6 +51,71 @@ class TestDeriveFolder:
 
 
 # ── ProtonClient ──────────────────────────────────────────────────────────────
+
+
+class TestSessionPersistence:
+    """A token refresh must carry key material forward, not clobber it.
+
+    Proton only grants the ``locked`` scope needed to fetch key salts during a
+    fresh password login. If a refresh overwrites the file with just tokens,
+    the cached passphrase is gone forever and the next restart cannot decrypt.
+    """
+
+    def _client(self, tmp_path) -> ProtonClient:
+        return ProtonClient(
+            username="test@proton.me",
+            password="",
+            session_path=tmp_path / "session.json",
+        )
+
+    def test_save_session_preserves_key_material(self, tmp_path) -> None:
+        path = tmp_path / "session.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "access_token": "old-access",
+                    "refresh_token": "old-refresh",
+                    "uid": "uid-1",
+                    "key_salts": {"key-1": "c2FsdA=="},
+                    "mailbox_passphrase": "bcrypt-derived-passphrase",
+                }
+            )
+        )
+
+        api = self._client(tmp_path)
+        api._access_token = "new-access"
+        api._refresh_token = "new-refresh"
+        api._save_session()
+
+        data = json.loads(path.read_text())
+        assert data["access_token"] == "new-access"
+        assert data["refresh_token"] == "new-refresh"
+        assert data["uid"] == "uid-1"
+        assert data["key_salts"] == {"key-1": "c2FsdA=="}
+        assert data["mailbox_passphrase"] == "bcrypt-derived-passphrase"
+
+    def test_save_session_writes_atomically_and_privately(self, tmp_path) -> None:
+        api = self._client(tmp_path)
+        api._access_token = "a"
+        api._refresh_token = "r"
+        api._uid = "u"
+        api._save_session()
+
+        path = tmp_path / "session.json"
+        assert path.exists()
+        assert not (tmp_path / "session.json.tmp").exists()
+        assert (path.stat().st_mode & 0o777) == 0o600
+
+    def test_session_has_key_material_detects_loss(self, tmp_path) -> None:
+        api = self._client(tmp_path)
+        api._access_token = "a"
+        api._refresh_token = "r"
+        api._uid = "u"
+        api._save_session()
+        assert api._session_has_key_material() is False
+
+        (tmp_path / "session.json").write_text(json.dumps({"mailbox_passphrase": "present"}))
+        assert api._session_has_key_material() is True
 
 
 @pytest.fixture
