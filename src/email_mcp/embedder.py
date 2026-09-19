@@ -41,6 +41,13 @@ def _serialize_f32(vector: np.ndarray) -> bytes:
 _DEFAULT_MODEL = "intfloat/multilingual-e5-large-instruct"
 _EMBEDDING_DIMS = 1024
 _QUERY_PREFIX = "query: "
+
+# Reranker input is capped hard: the cross-encoder cost scales with tokens, and
+# the tail of an email is quoted replies, signatures and unsubscribe footers —
+# noise for relevance. Subject + the opening lines carry the signal. Measured
+# on the real corpus: 2000 chars cost ~21s per search, 300 chars ~3.6s, with
+# no loss of the semantic matching bge-reranker-v2-m3 was picked for.
+_RERANK_BODY_CHARS = 300
 _DOC_PREFIX = "passage: "
 _RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 
@@ -489,7 +496,7 @@ class Embedder:
         for msg in results:
             body = db.bodies.get(msg.pm_id) or ""
             sender = msg.sender_name or msg.sender_email
-            doc = f"From: {sender}\nSubject: {msg.subject or ''}\n\n{body[:2000]}"
+            doc = f"From: {sender}\nSubject: {msg.subject or ''}\n\n{body[:_RERANK_BODY_CHARS]}"
             pairs.append([query, doc])
         return pairs
 
