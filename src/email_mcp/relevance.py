@@ -57,7 +57,8 @@ async def score_relevance_raw(query: str, results: list[dict], api_key: str) -> 
     try:
         scores = await _llm_score(_build_prompt(query, results), api_key, len(results))
     except Exception as e:
-        logger.warning("relevance.score_failed", error=str(e))
+        # ReadTimeout stringifies to "", which made these undiagnosable.
+        logger.warning("relevance.score_failed", error=f"{type(e).__name__}: {e}")
         return None
 
     if not scores or len(scores) != len(results):
@@ -109,6 +110,11 @@ async def score_relevance(
 
 async def _llm_score(prompt: str, api_key: str, count: int) -> list[int] | None:
     """Call Together API to score relevance."""
+    # One number per result, plus separators. A flat 100 was far too tight: a
+    # 45-result search needs 90+ tokens for the numbers alone, so the response
+    # came back truncated, the score count fell short, and the caller silently
+    # gave up and returned every result unfiltered.
+    max_tokens = max(100, count * 8)
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             _API_URL,
@@ -119,10 +125,10 @@ async def _llm_score(prompt: str, api_key: str, count: int) -> list[int] | None:
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 100,
+                "max_tokens": max_tokens,
                 "temperature": 0.0,
             },
-            timeout=10,
+            timeout=20,
         )
 
     if resp.status_code != 200:

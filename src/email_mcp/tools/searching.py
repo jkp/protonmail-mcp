@@ -295,6 +295,9 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
     summaries: dict[str, str] = {}
     # Filled by the parallel scoring step so relevance is never computed twice.
     rel_scores: dict[str, int] = {}
+    # Set when the parallel step already tried relevance, so a failure falls back
+    # to reranker order instead of paying for a second, serial LLM call.
+    relevance_attempted = False
 
     if parsed.raw_fts_terms:
         soft_candidates: list = []
@@ -403,6 +406,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                 # and candidates and returns its own scores — so run them
                 # together. In sequence they cost their sum (~5s); concurrent
                 # the stage costs the slower of the two (~2.5s).
+                relevance_attempted = bool(settings.together_api_key)
                 scored, (rel_scores, summaries) = await asyncio.gather(
                     asyncio.to_thread(_embedder.score, parsed.raw_fts_terms, head, db),
                     _score_candidates(
@@ -467,7 +471,7 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
     if formatted and parsed.raw_fts_terms:
         if rel_scores:
             formatted = _apply_relevance_filter(formatted, results, rel_scores)
-        elif settings.together_api_key:
+        elif settings.together_api_key and not relevance_attempted:
             try:
                 formatted = await score_relevance(
                     parsed.raw_fts_terms, formatted, api_key=settings.together_api_key
