@@ -26,6 +26,17 @@ def test_proton_session_path_expands_user():
     assert str(settings.proton_session_file).endswith("session.json")
 
 
+def test_proton_keys_file_defaults_to_sibling_of_session():
+    settings = Settings(proton_session_path=Path("/data/proton_session.json"))
+    assert settings.proton_keys_file == Path("/data/proton_keys.json")
+
+
+def test_proton_keys_file_override(monkeypatch):
+    monkeypatch.setenv("EMAIL_MCP_PROTON_KEYS_PATH", "/data/keys.json")
+    settings = Settings()
+    assert str(settings.proton_keys_file) == "/data/keys.json"
+
+
 def test_env_prefix(monkeypatch):
     monkeypatch.setenv("EMAIL_MCP_IMAP_USERNAME", "user@proton.me")
     monkeypatch.setenv("EMAIL_MCP_TRANSPORT", "http")

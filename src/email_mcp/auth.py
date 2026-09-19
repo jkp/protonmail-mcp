@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import getpass
 import json
+import os
 import sys
 
 import httpx
@@ -176,7 +177,16 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(session, indent=2))
 
+    # Key material also goes in its own file, which token refreshes never touch.
+    keys_path = settings.proton_keys_file
+    keys_path.parent.mkdir(parents=True, exist_ok=True)
+    keys_path.write_text(
+        json.dumps({"key_salts": key_salts, "mailbox_passphrase": mailbox_passphrase}, indent=2)
+    )
+    os.chmod(keys_path, 0o600)
+
     print(f"Session saved to {out_path}", file=sys.stderr)
+    print(f"Key material saved to {keys_path}", file=sys.stderr)
     if mailbox_passphrase:
         print(
             "Mailbox passphrase cached in session file. PASSWORD IS NO LONGER NEEDED AT RUNTIME.",

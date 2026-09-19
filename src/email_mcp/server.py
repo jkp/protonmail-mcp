@@ -38,14 +38,17 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize v5 components: ProtonMail API, PGP keys, event loop, body indexer."""
-    import json
 
     import email_mcp.tools.batch as batch
     import email_mcp.tools.composing as composing
     import email_mcp.tools.managing as managing
     import email_mcp.tools.reading as reading
     from email_mcp.body_indexer import BodyIndexer
-    from email_mcp.crypto import ProtonKeyRing, derive_mailbox_passphrase
+    from email_mcp.crypto import (
+        ProtonKeyRing,
+        derive_mailbox_passphrase,
+        load_cached_key_material,
+    )
     from email_mcp.decryptor import ProtonDecryptor
     from email_mcp.event_loop import EventLoop
     from email_mcp.initial_sync import InitialSync
@@ -87,11 +90,11 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
 
         # 4. Load PGP keys for message decryption (non-fatal)
         async def _load_keys() -> ProtonDecryptor:
-            session_data = json.loads(settings.proton_session_file.read_text())
-            passphrase = session_data.get("mailbox_passphrase", "")
+            passphrase, key_salts = load_cached_key_material(
+                settings.proton_session_file, settings.proton_keys_file
+            )
             if not passphrase:
                 # Fallback: derive from password + key salt (legacy sessions)
-                key_salts = session_data.get("key_salts", {})
                 user_data = await api.get_user()
                 user_key_id = user_data["Keys"][0]["ID"]
                 key_salt = key_salts.get(user_key_id)

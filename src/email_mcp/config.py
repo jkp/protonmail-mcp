@@ -27,9 +27,18 @@ class Settings(BaseSettings):
     proton_password: str = ""
     proton_session_path: Path = Path("~/.local/share/email-mcp/proton_session.json")
 
+    # Key material lives in its own file so the rotating token file can never
+    # clobber it. Defaults to a sibling of the session file.
+    proton_keys_path: Path | None = None
+
     @property
     def proton_session_file(self) -> Path:
         return self.proton_session_path.expanduser().resolve()
+
+    @property
+    def proton_keys_file(self) -> Path:
+        base = self.proton_keys_path or self.proton_session_path.with_name("proton_keys.json")
+        return base.expanduser().resolve()
 
     # ProtonMail web UI account index (for generating web URLs)
     proton_account_index: int = 0

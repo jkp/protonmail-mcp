@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pgpy
 import pytest
 from pgpy.constants import (
@@ -12,7 +14,12 @@ from pgpy.constants import (
     SymmetricKeyAlgorithm,
 )
 
-from email_mcp.crypto import DecryptionError, ProtonKeyRing, derive_mailbox_passphrase
+from email_mcp.crypto import (
+    DecryptionError,
+    ProtonKeyRing,
+    derive_mailbox_passphrase,
+    load_cached_key_material,
+)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -94,6 +101,41 @@ class TestDeriveMailboxPassphrase:
 
 
 # ── ProtonKeyRing ────────────────────────────────────────────────────────────
+
+
+class TestLoadCachedKeyMaterial:
+    def test_prefers_separate_keys_file(self, tmp_path):
+        session = tmp_path / "session.json"
+        keys = tmp_path / "keys.json"
+        session.write_text(
+            json.dumps({"mailbox_passphrase": "from-session", "key_salts": {"a": "1"}})
+        )
+        keys.write_text(json.dumps({"mailbox_passphrase": "from-keys", "key_salts": {"b": "2"}}))
+        passphrase, key_salts = load_cached_key_material(session, keys)
+        assert passphrase == "from-keys"
+        assert key_salts == {"b": "2"}
+
+    def test_falls_back_to_session_file(self, tmp_path):
+        session = tmp_path / "session.json"
+        session.write_text(
+            json.dumps({"mailbox_passphrase": "from-session", "key_salts": {"a": "1"}})
+        )
+        passphrase, key_salts = load_cached_key_material(session, tmp_path / "missing.json")
+        assert passphrase == "from-session"
+        assert key_salts == {"a": "1"}
+
+    def test_missing_everything_is_empty(self, tmp_path):
+        passphrase, key_salts = load_cached_key_material(tmp_path / "a.json", tmp_path / "b.json")
+        assert passphrase == ""
+        assert key_salts == {}
+
+    def test_corrupt_keys_file_falls_back(self, tmp_path):
+        session = tmp_path / "session.json"
+        session.write_text(json.dumps({"mailbox_passphrase": "s"}))
+        keys = tmp_path / "keys.json"
+        keys.write_text("{not json")
+        passphrase, _ = load_cached_key_material(session, keys)
+        assert passphrase == "s"
 
 
 class TestProtonKeyRing:

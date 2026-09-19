@@ -9,7 +9,9 @@ Handles the full decryption chain:
 from __future__ import annotations
 
 import base64
+import json
 import threading
+from pathlib import Path
 
 import bcrypt
 import pgpy
@@ -19,6 +21,34 @@ from email_mcp.srp import _BCRYPT_B64, _STD_B64
 
 class DecryptionError(Exception):
     """No available key could decrypt the message."""
+
+
+def load_cached_key_material(session_path: Path, keys_path: Path) -> tuple[str, dict]:
+    """Load the cached mailbox passphrase + key salts.
+
+    Prefers the dedicated keys file, which token refreshes never touch, and
+    falls back to the legacy session file where the material used to live.
+    Proton only grants the ``locked`` scope needed to refetch key salts during
+    a fresh password login, so this material cannot be regenerated at runtime.
+
+    Returns (mailbox_passphrase, key_salts). Either may be empty if unset.
+    """
+
+    def _read(path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    keys = _read(keys_path)
+    if keys.get("mailbox_passphrase"):
+        return keys["mailbox_passphrase"], keys.get("key_salts", {})
+
+    session = _read(session_path)
+    return session.get("mailbox_passphrase", ""), session.get("key_salts", {})
 
 
 def derive_mailbox_passphrase(password: str, key_salt_b64: str) -> str:
