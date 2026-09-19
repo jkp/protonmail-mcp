@@ -9,7 +9,7 @@ import structlog
 from email_mcp.db import _row_to_message
 from email_mcp.embedder import Embedder
 from email_mcp.query_builder import build_query
-from email_mcp.relevance import score_relevance
+from email_mcp.relevance import _RELEVANCE_THRESHOLD, score_relevance, score_relevance_raw
 from email_mcp.server import db, mcp, settings
 from email_mcp.summarizer import summarize_messages
 from email_mcp.tools.listing import _web_url
@@ -176,6 +176,48 @@ def _dedup_conversations(scored: list[tuple[float, Any]]) -> list[tuple[float, A
     return result
 
 
+async def _score_candidates(
+    query: str, msgs: list, db_ref: Any, api_key: str
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Summarize candidates and fetch raw relevance scores.
+
+    Returns ({pm_id: score}, {pm_id: summary}). Scores come back empty if the
+    LLM call fails, and the caller falls back to reranker order.
+    """
+    if not api_key or not msgs:
+        return {}, {}
+
+    summaries = await summarize_messages([m.pm_id for m in msgs], db_ref, api_key=api_key)
+    results = [_format_result(m, summaries.get(m.pm_id)) for m in msgs]
+    scores = await score_relevance_raw(query, results, api_key)
+    if scores is None:
+        return {}, summaries
+    return dict(zip((m.pm_id for m in msgs), scores)), summaries
+
+
+def _apply_relevance_filter(
+    formatted: list[dict[str, Any]], results: list, rel_scores: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Drop results below threshold, annotating the survivors.
+
+    Mirrors score_relevance: keep everything >= threshold, and if nothing
+    qualifies keep the top 3 rather than returning an empty list.
+    """
+    paired = [(f, rel_scores.get(r.pm_id, 0)) for f, r in zip(formatted, results)]
+    kept = [(f, s) for f, s in paired if s >= _RELEVANCE_THRESHOLD]
+    if not kept:
+        kept = paired[:3]
+    for f, s in kept:
+        f["relevance_score"] = s
+    logger.info(
+        "relevance.filtered",
+        before=len(paired),
+        after=len(kept),
+        scores=",".join(str(s) for _, s in paired),
+    )
+    return [f for f, _ in kept]
+
+
 def _format_date(unix_ts: int) -> str:
     return datetime.fromtimestamp(unix_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -250,6 +292,9 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
     parsed = build_query(query)
 
     results: list = []
+    summaries: dict[str, str] = {}
+    # Filled by the parallel scoring step so relevance is never computed twice.
+    rel_scores: dict[str, int] = {}
 
     if parsed.raw_fts_terms:
         soft_candidates: list = []
@@ -354,18 +399,35 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
                 head = all_candidates[:_RERANK_MAX_CANDIDATES]
                 tail = all_candidates[_RERANK_MAX_CANDIDATES:]
 
-                scored = await asyncio.to_thread(_embedder.score, parsed.raw_fts_terms, head, db)
+                # The two scoring passes are independent — each takes the query
+                # and candidates and returns its own scores — so run them
+                # together. In sequence they cost their sum (~5s); concurrent
+                # the stage costs the slower of the two (~2.5s).
+                scored, (rel_scores, summaries) = await asyncio.gather(
+                    asyncio.to_thread(_embedder.score, parsed.raw_fts_terms, head, db),
+                    _score_candidates(
+                        parsed.raw_fts_terms, all_candidates, db, settings.together_api_key
+                    ),
+                )
+
                 if tail:
                     floor = min((s for s, _ in scored), default=0.0) - 1.0
                     scored = scored + [(floor - i, m) for i, m in enumerate(tail)]
 
+                # Relevance is the coarser but more reliable signal (a 1-5 from
+                # the LLM); the cross-encoder breaks ties inside a band. Ordering
+                # on the reranker alone stranded genuinely relevant mail at
+                # position 20+ whenever its logits came back flat at 0.00.
+                scored.sort(key=lambda t: (-rel_scores.get(t[1].pm_id, 0), -t[0]))
+
                 top_score = scored[0][0] if scored else 0.0
                 logger.info(
-                    "tool.search.reranked",
+                    "tool.search.scored",
                     candidates=len(head),
                     tail=len(tail),
                     pool=pool,
                     guaranteed=len(guaranteed_only),
+                    relevance_scored=len(rel_scores),
                     top_score=f"{top_score:.2f}",
                 )
 
@@ -388,9 +450,9 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
         except Exception as e:
             logger.warning("tool.search.filter_error", error=str(e))
 
-    # Lazy-summarize results (parallel LLM calls, cached in DB)
-    summaries: dict[str, str] = {}
-    if results and settings.together_api_key:
+    # Summaries normally arrive with the parallel scoring step; only fetch them
+    # here when that step didn't run (filter-only queries, or no embedder).
+    if results and settings.together_api_key and not summaries:
         try:
             summaries = await summarize_messages(
                 [r.pm_id for r in results], db, api_key=settings.together_api_key
@@ -400,14 +462,18 @@ async def search(query: str, limit: int = 20, offset: int = 0) -> list[dict[str,
 
     formatted = [_format_result(r, summaries.get(r.pm_id)) for r in results]
 
-    # LLM relevance filter — one call to score all results, drop the noise
-    if formatted and settings.together_api_key and parsed.raw_fts_terms:
-        try:
-            formatted = await score_relevance(
-                parsed.raw_fts_terms, formatted, api_key=settings.together_api_key
-            )
-        except Exception as e:
-            logger.warning("tool.search.relevance_error", error=str(e))
+    # LLM relevance filter — drop the noise. Skip the call when the parallel
+    # step already produced scores for these candidates.
+    if formatted and parsed.raw_fts_terms:
+        if rel_scores:
+            formatted = _apply_relevance_filter(formatted, results, rel_scores)
+        elif settings.together_api_key:
+            try:
+                formatted = await score_relevance(
+                    parsed.raw_fts_terms, formatted, api_key=settings.together_api_key
+                )
+            except Exception as e:
+                logger.warning("tool.search.relevance_error", error=str(e))
 
     logger.info("tool.search.done", query=query, count=len(formatted))
     return formatted

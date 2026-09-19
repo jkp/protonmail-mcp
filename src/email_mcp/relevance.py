@@ -35,6 +35,42 @@ order as the input. Example: 5,3,1,4,2
 Do not explain your reasoning. Just output the scores."""
 
 
+def _build_prompt(query: str, results: list[dict]) -> str:
+    """One compact line per result — From | Subject | summary."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        summary = r.get("summary", r.get("subject", ""))
+        lines.append(f"{i}. From: {r['from']} | Subject: {r['subject']} | {summary}")
+    return f"Query: {query}\n\nResults:\n" + "\n".join(lines)
+
+
+async def score_relevance_raw(query: str, results: list[dict], api_key: str) -> list[int] | None:
+    """Score each result 1-5 for relevance. Returns scores in input order, or None.
+
+    Separate from score_relevance so the caller can run it concurrently with the
+    cross-encoder reranker — the two take the same query and candidates and are
+    independent, so running them in sequence just adds the latencies together.
+    """
+    if not api_key or not results:
+        return None
+
+    try:
+        scores = await _llm_score(_build_prompt(query, results), api_key, len(results))
+    except Exception as e:
+        logger.warning("relevance.score_failed", error=str(e))
+        return None
+
+    if not scores or len(scores) != len(results):
+        logger.warning(
+            "relevance.score_mismatch",
+            expected=len(results),
+            got=len(scores) if scores else 0,
+        )
+        return None
+
+    return scores
+
+
 async def score_relevance(
     query: str,
     results: list[dict],
@@ -49,26 +85,8 @@ async def score_relevance(
     if not api_key or not results:
         return results
 
-    # Build the prompt with all results
-    lines = []
-    for i, r in enumerate(results, 1):
-        summary = r.get("summary", r.get("subject", ""))
-        lines.append(f"{i}. From: {r['from']} | Subject: {r['subject']} | {summary}")
-
-    user_prompt = f"Query: {query}\n\nResults:\n" + "\n".join(lines)
-
-    try:
-        scores = await _llm_score(user_prompt, api_key, len(results))
-    except Exception as e:
-        logger.warning("relevance.score_failed", error=str(e))
-        return results
-
-    if not scores or len(scores) != len(results):
-        logger.warning(
-            "relevance.score_mismatch",
-            expected=len(results),
-            got=len(scores) if scores else 0,
-        )
+    scores = await score_relevance_raw(query, results, api_key)
+    if scores is None:
         return results
 
     # Filter and annotate

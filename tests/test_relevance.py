@@ -114,3 +114,83 @@ class TestScoreRelevance:
             filtered = await score_relevance("test", results, api_key="test", threshold=4)
 
         assert len(filtered) == 2
+
+
+class TestScoreRelevanceRaw:
+    """Raw scores let search() run relevance concurrently with the reranker."""
+
+    async def test_returns_scores_in_input_order(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        with patch(
+            "email_mcp.relevance._llm_score",
+            new_callable=AsyncMock,
+            return_value=[4, 2, 5],
+        ):
+            scores = await score_relevance_raw("q", _make_results(3), api_key="test")
+
+        assert scores == [4, 2, 5]
+
+    async def test_returns_none_on_llm_failure(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        with patch(
+            "email_mcp.relevance._llm_score",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("router down"),
+        ):
+            assert await score_relevance_raw("q", _make_results(3), api_key="test") is None
+
+    async def test_returns_none_on_count_mismatch(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        with patch(
+            "email_mcp.relevance._llm_score",
+            new_callable=AsyncMock,
+            return_value=[4, 2],
+        ):
+            assert await score_relevance_raw("q", _make_results(3), api_key="test") is None
+
+    async def test_no_api_key_is_a_noop(self) -> None:
+        from email_mcp.relevance import score_relevance_raw
+
+        assert await score_relevance_raw("q", _make_results(3), api_key="") is None
+
+
+class TestApplyRelevanceFilter:
+    """The parallel path filters using scores it already has, not a second call."""
+
+    @staticmethod
+    def _pair(n: int = 5):
+        from types import SimpleNamespace
+
+        results = [SimpleNamespace(pm_id=f"m{i}") for i in range(n)]
+        formatted = [{"id": i, "subject": f"S{i}"} for i in range(n)]
+        return formatted, results
+
+    def test_keeps_at_or_above_threshold(self) -> None:
+        from email_mcp.tools.searching import _apply_relevance_filter
+
+        formatted, results = self._pair()
+        kept = _apply_relevance_filter(
+            formatted, results, {"m0": 5, "m1": 1, "m2": 3, "m3": 2, "m4": 4}
+        )
+
+        assert [f["id"] for f in kept] == [0, 2, 4]
+        assert kept[0]["relevance_score"] == 5
+
+    def test_falls_back_to_top_three_when_nothing_passes(self) -> None:
+        from email_mcp.tools.searching import _apply_relevance_filter
+
+        formatted, results = self._pair()
+        kept = _apply_relevance_filter(formatted, results, {f"m{i}": 1 for i in range(5)})
+
+        assert [f["id"] for f in kept] == [0, 1, 2]
+
+    def test_missing_score_is_treated_as_irrelevant(self) -> None:
+        from email_mcp.tools.searching import _apply_relevance_filter
+
+        formatted, results = self._pair(3)
+        kept = _apply_relevance_filter(formatted, results, {"m0": 5})
+
+        assert [f["id"] for f in kept] == [0]
