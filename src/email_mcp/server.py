@@ -266,6 +266,20 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             ).fetchone()[0]
             logger.info("server.bulk_reindex_done", remaining=remaining)
 
+        # 7a. Give permanently-failed bodies another chance before the bulk pass.
+        # -1 means "give up forever", but re-running the pass in production
+        # recovered 400 of 417 — they were one-off fetch failures, not bad
+        # messages, and every one of them had been invisible to search since.
+        # Idempotent: anything that fails again is immediately re-marked -1.
+        if body_indexer:
+            failed_bodies = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE body_indexed = -1"
+            ).fetchone()[0]
+            if failed_bodies:
+                db.execute("UPDATE messages SET body_indexed = 0 WHERE body_indexed = -1")
+                db.commit()
+                logger.info("server.retry_failed_bodies", count=failed_bodies)
+
         # 7b. Start bulk body re-index as background task (non-blocking)
         background_tasks.append(
             asyncio.create_task(_bulk_reindex_bodies(), name="bulk_reindex_bodies")
