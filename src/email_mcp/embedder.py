@@ -230,6 +230,21 @@ class Embedder:
             self._local_model = self._load_local_model(self._model_name)
         return self._local_model.encode(texts, batch_size=_BATCH_SIZE, show_progress_bar=False)
 
+    def _encode_query(self, texts: list[str]) -> np.ndarray:
+        """Encode a search query, preferring the HF API over the local model.
+
+        The local CPU model costs ~5s per query, which makes iterating on a
+        search interactively unusable. The same model on HF returns the
+        identical vector (cosine 1.0, float32 rounding only) in well under a
+        second. Falls back to local so a search never fails outright.
+        """
+        if self._hf_key and self._embedding_api_url:
+            try:
+                return self._encode_via_hf(texts)
+            except Exception:
+                logger.warning("embedder.query_api_fallback_local", exc_info=True)
+        return self._encode_local(texts)
+
     def _ensure_table(self) -> None:
         """Create the vectors table if it doesn't exist."""
         import sqlite_vec
@@ -379,7 +394,7 @@ class Embedder:
         No distance threshold — the reranker + bulk penalty handle precision.
         Vector search's job is candidate recall: cast a wide net.
         """
-        vec = self._encode_local([f"{_QUERY_PREFIX}{query}"])
+        vec = self._encode_query([f"{_QUERY_PREFIX}{query}"])
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         # Over-fetch chunks since multiple chunks can belong to one message
@@ -419,7 +434,7 @@ class Embedder:
         limit: int = 20,
     ) -> list[str]:
         """Semantic search with SQL pre-filters."""
-        vec = self._encode_local([f"{_QUERY_PREFIX}{query}"])
+        vec = self._encode_query([f"{_QUERY_PREFIX}{query}"])
         query_vec = np.asarray(vec[0], dtype=np.float32)
 
         # Over-fetch chunks to account for dedup + filtering. Kept modest:

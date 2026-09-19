@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from email_mcp.db import Database, MessageRow
-from email_mcp.embedder import Embedder
+from email_mcp.embedder import _QUERY_PREFIX, Embedder
 
 
 @pytest.fixture
@@ -139,6 +139,56 @@ class TestVectorSearch:
 
         results = embedder.search("email", limit=3)
         assert len(results) <= 3
+
+
+class TestQueryEncoding:
+    """Query encoding prefers the HF API (~0.2s) over the local CPU model (~5s).
+
+    Both run the same weights, so vectors are interchangeable; the API just
+    removes the multi-second CPU stall that made interactive search painful.
+    """
+
+    HF_KW = {"hf_api_key": "hf_test", "embedding_api_url": "https://hf.test/embed"}
+
+    def test_uses_local_when_no_hf_key(self, db, mock_model):
+        e = Embedder(db=db, model=mock_model)
+        e._encode_local = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._encode_via_hf = MagicMock()
+        e._encode_query(["query: x"])
+        e._encode_local.assert_called_once()
+        e._encode_via_hf.assert_not_called()
+
+    def test_uses_hf_when_configured(self, db, mock_model):
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._encode_local = MagicMock()
+        e._encode_via_hf = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._encode_query(["query: x"])
+        e._encode_via_hf.assert_called_once()
+        e._encode_local.assert_not_called()
+
+    def test_falls_back_to_local_when_hf_fails(self, db, mock_model):
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._encode_via_hf = MagicMock(side_effect=RuntimeError("HF API 502"))
+        e._encode_local = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        out = e._encode_query(["query: x"])
+        e._encode_local.assert_called_once()
+        assert out.shape == (1, 1024)
+
+    def test_search_encodes_via_hf(self, db, mock_model):
+        """search() must not touch the local model when the API is available."""
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._encode_via_hf = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._encode_local = MagicMock()
+        e.search("benson headphones", limit=5)
+        e._encode_via_hf.assert_called_once()
+        e._encode_local.assert_not_called()
+
+    def test_query_prefix_preserved(self, db, mock_model):
+        """The e5 'query: ' prefix changes the vector, so it must survive."""
+        e = Embedder(db=db, model=mock_model, **self.HF_KW)
+        e._encode_via_hf = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._encode_query([f"{_QUERY_PREFIX}benson"])
+        assert e._encode_via_hf.call_args[0][0] == ["query: benson"]
 
 
 class TestSkipFilter:
