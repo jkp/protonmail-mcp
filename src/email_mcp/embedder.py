@@ -217,22 +217,36 @@ class Embedder:
         return _call()
 
     def warmup(self) -> None:
-        """Pre-load local models — but skip any the HF endpoints have replaced.
+        """Bring both inference paths to a ready state.
 
-        The router serves both the embedder and the reranker, so loading
-        ~4.6GB of local weights just to sit idle is waste. They load lazily
-        if an API call ever fails.
+        When the HF endpoints are configured they replace the local weights —
+        no point loading ~4.6GB to sit idle — but the router cold-starts a
+        model on first use (measured ~30s). So ping both endpoints here rather
+        than making the first real search pay it.
         """
         use_hf_embed = bool(self._hf_key and self._embedding_api_url)
         use_hf_rerank = bool(self._hf_key and self._rerank_api_url)
-        if self._local_model is None and not use_hf_embed:
+
+        if use_hf_embed:
+            try:
+                self._encode_via_hf(["warmup"])
+            except Exception:
+                logger.warning("embedder.warmup.hf_embed_failed", exc_info=True)
+        elif self._local_model is None:
             logger.info("embedder.warmup.embedding_model")
             self._local_model = self._load_local_model(self._model_name)
-        if self._reranker is None and not use_hf_rerank:
+
+        if use_hf_rerank:
+            try:
+                self._rerank_via_hf([["warmup", "warmup"]])
+            except Exception:
+                logger.warning("embedder.warmup.hf_rerank_failed", exc_info=True)
+        elif self._reranker is None:
             from sentence_transformers import CrossEncoder
 
             logger.info("embedder.warmup.reranker")
             self._reranker = CrossEncoder(_RERANKER_MODEL)
+
         logger.info("embedder.warmup.done", hf_embed=use_hf_embed, hf_rerank=use_hf_rerank)
 
     def _encode_local(self, texts: list[str]) -> np.ndarray:

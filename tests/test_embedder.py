@@ -243,9 +243,40 @@ class TestReranking:
             rerank_api_url="https://hf.test/rank",
         )
         e._load_local_model = MagicMock(side_effect=AssertionError("should not load"))
+        e._encode_via_hf = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._rerank_via_hf = MagicMock(return_value=np.zeros(1, dtype=np.float32))
         e.warmup()
         assert e._local_model is None
         assert e._reranker is None
+
+    def test_warmup_pings_hf_endpoints(self, db, mock_model):
+        """The router cold-starts models (~30s); warm them at startup instead."""
+        e = Embedder(
+            db=db,
+            model=None,
+            hf_api_key="hf_test",
+            embedding_api_url="https://hf.test/embed",
+            rerank_api_url="https://hf.test/rank",
+        )
+        e._encode_via_hf = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+        e._rerank_via_hf = MagicMock(return_value=np.zeros(1, dtype=np.float32))
+        e.warmup()
+        e._encode_via_hf.assert_called_once()
+        e._rerank_via_hf.assert_called_once()
+
+    def test_warmup_survives_hf_outage(self, db, mock_model):
+        """A failed warmup must not stop the server starting."""
+        e = Embedder(
+            db=db,
+            model=None,
+            hf_api_key="hf_test",
+            embedding_api_url="https://hf.test/embed",
+            rerank_api_url="https://hf.test/rank",
+        )
+        e._encode_via_hf = MagicMock(side_effect=RuntimeError("down"))
+        e._rerank_via_hf = MagicMock(side_effect=RuntimeError("down"))
+        e.warmup()  # must not raise
+        assert e._local_model is None
 
 
 class TestSkipFilter:
