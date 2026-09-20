@@ -22,6 +22,11 @@ from typing import Any
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+-- One connection is shared across threads (check_same_thread=False): the event
+-- loop and the embedder's worker thread both write. WAL admits one writer at a
+-- time, so without a busy timeout a collision surfaces immediately as
+-- "database is locked" rather than waiting its turn.
+PRAGMA busy_timeout = 30000;
 
 CREATE TABLE IF NOT EXISTS messages (
     pm_id           TEXT PRIMARY KEY,

@@ -13,8 +13,9 @@ No Bridge IMAP dependency — all operations use the ProtonMail REST API directl
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastmcp import FastMCP
@@ -36,6 +37,32 @@ logger = structlog.get_logger()
 
 
 @asynccontextmanager
+def _watch_background_task(task: asyncio.Task) -> None:
+    """Report a background task that died.
+
+    Nothing awaits these tasks, so an exception inside one is never observed:
+    the subsystem simply stops, the server keeps answering, and nothing is
+    logged. That is exactly how the embed drain died unnoticed and the backlog
+    sat frozen at ~800 messages. Any such death should be loud.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "server.background_task_died",
+            task=task.get_name(),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _spawn_background(coro: Coroutine[Any, Any, None], name: str) -> asyncio.Task:
+    """create_task, but a death gets logged rather than swallowed."""
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(_watch_background_task)
+    return task
+
+
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize v5 components: ProtonMail API, PGP keys, event loop, body indexer."""
 
@@ -217,7 +244,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                     page += 1
                 logger.info("server.resync_metadata.done", synced=synced)
 
-            background_tasks.append(asyncio.create_task(_resync_metadata(), name="resync_metadata"))
+            background_tasks.append(_spawn_background(_resync_metadata(), "resync_metadata"))
 
         async def _bulk_reindex_bodies() -> None:
             """Background task: index unindexed bodies in priority order.
@@ -281,9 +308,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 logger.info("server.retry_failed_bodies", count=failed_bodies)
 
         # 7b. Start bulk body re-index as background task (non-blocking)
-        background_tasks.append(
-            asyncio.create_task(_bulk_reindex_bodies(), name="bulk_reindex_bodies")
-        )
+        background_tasks.append(_spawn_background(_bulk_reindex_bodies(), "bulk_reindex_bodies"))
 
         # 7c. Start embedding pipeline (downstream of body indexer)
         embedder = None
@@ -329,7 +354,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 )
                 logger.info("server.reindex_content.done")
 
-            background_tasks.append(asyncio.create_task(_reindex_content(), name="reindex_content"))
+            background_tasks.append(_spawn_background(_reindex_content(), "reindex_content"))
 
         # 7e. Reset embeddings if reembed flag is set
         if settings.reembed and embedder:
@@ -346,7 +371,7 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, embedder.warmup)
 
-            background_tasks.append(asyncio.create_task(_warmup_models(), name="warmup_models"))
+            background_tasks.append(_spawn_background(_warmup_models(), "warmup_models"))
 
         # Threshold: if more than this many messages are unembedded, use
         # Together API for speed. Below this, use local model (free).
@@ -379,9 +404,23 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                         batch=len(pm_ids),
                         mode="api" if use_api else "local",
                     )
-                    count = await loop.run_in_executor(
-                        pool, partial(embedder.embed_batch, pm_ids, use_api=use_api)
-                    )
+                    try:
+                        count = await loop.run_in_executor(
+                            pool, partial(embedder.embed_batch, pm_ids, use_api=use_api)
+                        )
+                    except Exception as exc:
+                        # This loop previously had no handler, and nothing awaits the
+                        # task, so a single failure killed it silently: the backlog
+                        # stopped draining for days while the server looked healthy.
+                        # Log it, back off, and keep going.
+                        logger.warning(
+                            "server.embed_batch_failed",
+                            batch=len(pm_ids),
+                            error=f"{type(exc).__name__}: {exc}",
+                            exc_info=True,
+                        )
+                        await asyncio.sleep(60)
+                        continue
                     logger.info(
                         "server.embed_progress",
                         embedded=count,
@@ -393,17 +432,15 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
 
-        background_tasks.append(asyncio.create_task(_embed_bodies(), name="embed_bodies"))
+        background_tasks.append(_spawn_background(_embed_bodies(), "embed_bodies"))
 
         # 8. Start event loop background task
-        background_tasks.append(asyncio.create_task(event_loop.run(), name="event_loop"))
+        background_tasks.append(_spawn_background(event_loop.run(), "event_loop"))
 
         # 9. Start body indexer worker queue (for ongoing events)
         if body_indexer:
             background_tasks.append(
-                asyncio.create_task(
-                    body_indexer.run_workers(event_loop.body_queue), name="body_indexer"
-                )
+                _spawn_background(body_indexer.run_workers(event_loop.body_queue), "body_indexer")
             )
 
         logger.info("server.ready")
