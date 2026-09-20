@@ -85,6 +85,27 @@ class TestEmbedBatch:
         assert msg1.embedded is True
         assert msg2.embedded is True
 
+    def test_reembedding_existing_chunks_replaces_them(self, embedder, db):
+        """A second pass over the same message must replace, not explode.
+
+        vec0 does not honour "INSERT OR REPLACE": re-inserting an existing
+        chunk_id raises UNIQUE constraint failure. A run that fails partway
+        leaves its earlier chunks behind, so every later attempt collided with
+        its own leftovers and the drain never recovered.
+        """
+        _insert_message(db, "pm-re", body="Hello from Alice")
+        assert embedder.embed_batch(["pm-re"]) == 1
+
+        # Put it back in the backlog without clearing its vectors.
+        db.execute("UPDATE messages SET embedded = 0 WHERE pm_id = 'pm-re'")
+        db.commit()
+
+        assert embedder.embed_batch(["pm-re"]) == 1
+        count = db.execute(
+            "SELECT COUNT(*) FROM message_vectors WHERE chunk_id LIKE 'pm-re:%'"
+        ).fetchone()[0]
+        assert count >= 1
+
     def test_skips_messages_without_bodies(self, embedder, db):
         _insert_message(db, "pm-1")  # no body
 

@@ -396,11 +396,20 @@ class Embedder:
         else:
             vectors = self._encode_local(all_texts)
 
-        # Store each chunk vector
+        # Store each chunk vector.
+        #
+        # NOT "INSERT OR REPLACE": vec0 does not honour it. Re-inserting a
+        # chunk_id that already exists raises "UNIQUE constraint failed on
+        # message_vectors primary key" instead of replacing the row. Because a
+        # run that fails partway leaves its earlier chunks behind, every retry
+        # then collided with its own leftovers -- which is what wedged the embed
+        # drain permanently at ~800 messages. Verifying on the live table:
+        # INSERT OR REPLACE fails, DELETE + INSERT succeeds.
         for chunk_id, vec in zip(all_chunk_ids, vectors):
             vec_f32 = np.asarray(vec, dtype=np.float32)
+            self._db.execute("DELETE FROM message_vectors WHERE chunk_id = ?", [chunk_id])
             self._db.execute(
-                "INSERT OR REPLACE INTO message_vectors (chunk_id, embedding) VALUES (?, ?)",
+                "INSERT INTO message_vectors (chunk_id, embedding) VALUES (?, ?)",
                 [chunk_id, _serialize_f32(vec_f32)],
             )
 
