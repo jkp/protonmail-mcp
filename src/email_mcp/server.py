@@ -36,7 +36,6 @@ configure_logging(
 logger = structlog.get_logger()
 
 
-@asynccontextmanager
 def _watch_background_task(task: asyncio.Task) -> None:
     """Report a background task that died.
 
@@ -63,6 +62,7 @@ def _spawn_background(coro: Coroutine[Any, Any, None], name: str) -> asyncio.Tas
     return task
 
 
+@asynccontextmanager
 async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Initialize v5 components: ProtonMail API, PGP keys, event loop, body indexer."""
 
