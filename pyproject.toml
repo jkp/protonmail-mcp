@@ -23,6 +23,7 @@ dependencies = [
     "justhtml>=1.12.0",
     "tenacity>=9.1.4",
     "email-reply-parser>=0.5.12",
+    "torch",  # transitive via sentence-transformers; declared so the CPU-only index below applies
 ]
 
 [project.scripts]
@@ -57,6 +58,21 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+# The boxes run CPU-only inference, but PyPI's linux torch wheel pulls in the
+# entire CUDA stack — ~4.5GB of nvidia-* wheels that can never be used here.
+# That is what made the image 7.8GB, and what filled the 98GB root filesystem
+# during builds. Take torch from PyTorch's CPU-only index instead; `explicit`
+# means this index is consulted for nothing else, so every other dependency
+# still resolves from PyPI.
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["E501"]
