@@ -87,6 +87,23 @@ CREATE TABLE IF NOT EXISTS labels (
     display_order INTEGER
 );
 
+-- Dead letter for bodies we could not fetch or decrypt.
+--
+-- body_indexed = -1 says "gave up" but cannot distinguish a one-off failure
+-- worth another try from mail this account will never be able to read, and it
+-- records no reason. Without attempts counted somewhere, a retry pass either
+-- gives up permanently (hiding recoverable mail -- 400 of 417 recovered when
+-- we retried) or retries the same hopeless rows forever. This table carries the
+-- attempt count and the last error so the retry can stop at a bounded number
+-- and the leftovers stay visible instead of silently vanishing from search.
+CREATE TABLE IF NOT EXISTS body_failures (
+    pm_id           TEXT PRIMARY KEY,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    first_failed_at INTEGER,
+    last_attempt_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS attachments (
     pm_id       TEXT NOT NULL REFERENCES messages(pm_id) ON DELETE CASCADE,
     filename    TEXT NOT NULL,
@@ -293,6 +310,66 @@ class _BodiesAccessor:
             return []
 
 
+class _BodyFailuresAccessor:
+    """Dead-letter records for bodies that could not be fetched or decrypted."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def record(self, pm_id: str, error: str) -> None:
+        """Note a failure, incrementing that message's attempt count."""
+        now = int(time.time())
+        self._conn.execute(
+            "INSERT INTO body_failures"
+            " (pm_id, attempts, last_error, first_failed_at, last_attempt_at)"
+            " VALUES (?, 1, ?, ?, ?)"
+            " ON CONFLICT(pm_id) DO UPDATE SET"
+            "   attempts = attempts + 1,"
+            "   last_error = excluded.last_error,"
+            "   last_attempt_at = excluded.last_attempt_at",
+            [pm_id, (error or "")[:500], now, now],
+        )
+        self._conn.commit()
+
+    def record_many(self, pm_ids: list[str], error: str) -> None:
+        for pm_id in pm_ids:
+            self.record(pm_id, error)
+
+    def clear(self, pm_id: str) -> None:
+        """Drop the record once a message finally indexes successfully."""
+        self._conn.execute("DELETE FROM body_failures WHERE pm_id = ?", [pm_id])
+        self._conn.commit()
+
+    def attempts(self, pm_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT attempts FROM body_failures WHERE pm_id = ?", [pm_id]
+        ).fetchone()
+        return row[0] if row else 0
+
+    def retryable_ids(self, max_attempts: int) -> list[str]:
+        """Failed messages still under the attempt cap.
+
+        A message with no failure record (pre-existing, or failed before this
+        table existed) counts as zero attempts and earns a first try.
+        """
+        rows = self._conn.execute(
+            "SELECT m.pm_id FROM messages m"
+            " LEFT JOIN body_failures f ON f.pm_id = m.pm_id"
+            " WHERE m.body_indexed = -1 AND COALESCE(f.attempts, 0) < ?",
+            [max_attempts],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def dead_letters(self, max_attempts: int) -> list[tuple[str, int, str | None]]:
+        """Messages past the cap, worst first: (pm_id, attempts, last_error)."""
+        rows = self._conn.execute(
+            "SELECT pm_id, attempts, last_error FROM body_failures"
+            " WHERE attempts >= ? ORDER BY attempts DESC",
+            [max_attempts],
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
+
 class _AttachmentsAccessor:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -418,6 +495,7 @@ class Database:
         self.sync_state = _SyncStateAccessor(self._conn)
         self.messages = _MessagesAccessor(self._conn)
         self.bodies = _BodiesAccessor(self._conn)
+        self.body_failures = _BodyFailuresAccessor(self._conn)
         self.attachments = _AttachmentsAccessor(self._conn)
         self.labels = _LabelsAccessor(self._conn)
 

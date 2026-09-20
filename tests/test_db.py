@@ -311,3 +311,63 @@ class TestBulkDiscriminator:
                  AND newsletter_id IS NULL"""
         ).fetchall()
         assert [r[0] for r in rows] == ["pm-real"]
+
+
+class TestBodyFailures:
+    """Dead letter: counts attempts so a retry can stop, and keeps the reason."""
+
+    def _fail(self, db: Database, pm_id: str) -> None:
+        db.execute("UPDATE messages SET body_indexed = -1 WHERE pm_id = ?", [pm_id])
+        db.commit()
+
+    def _insert(self, db: Database, pm_id: str) -> None:
+        db.messages.upsert(
+            MessageRow(
+                pm_id=pm_id,
+                message_id=f"{pm_id}@example.com",
+                subject="Test",
+                sender_name="Alice",
+                sender_email="alice@example.com",
+                recipients=[],
+                date=int(time.time()),
+                unread=False,
+                label_ids=["0"],
+                folder="INBOX",
+                size=1024,
+                has_attachments=False,
+                body_indexed=False,
+            )
+        )
+
+    def test_record_counts_attempts_and_keeps_reason(self, db: Database) -> None:
+        db.body_failures.record("pm-1", "No available key could decrypt the message")
+        db.body_failures.record("pm-1", "No available key could decrypt the message")
+        assert db.body_failures.attempts("pm-1") == 2
+        _, attempts, error = db.body_failures.dead_letters(0)[0]
+        assert attempts == 2
+        assert "No available key" in (error or "")
+
+    def test_retryable_stops_at_the_cap(self, db: Database) -> None:
+        for _ in range(3):
+            self._insert(db, "pm-cap")
+            self._fail(db, "pm-cap")
+            db.body_failures.record("pm-cap", "undecryptable")
+
+        assert db.body_failures.retryable_ids(3) == []
+        assert [c[0] for c in db.body_failures.dead_letters(3)] == ["pm-cap"]
+
+    def test_retryable_includes_legacy_failures_with_no_record(self, db: Database) -> None:
+        """Rows marked -1 before this table existed still deserve one try."""
+        self._insert(db, "pm-legacy")
+        self._fail(db, "pm-legacy")
+        assert db.body_failures.retryable_ids(3) == ["pm-legacy"]
+
+    def test_retryable_ignores_messages_that_are_not_flagged(self, db: Database) -> None:
+        self._insert(db, "pm-ok")
+        assert db.body_failures.retryable_ids(3) == []
+
+    def test_clear_removes_the_record_on_success(self, db: Database) -> None:
+        db.body_failures.record("pm-1", "boom")
+        db.body_failures.clear("pm-1")
+        assert db.body_failures.attempts("pm-1") == 0
+        assert db.body_failures.dead_letters(0) == []

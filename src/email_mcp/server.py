@@ -293,19 +293,34 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
             ).fetchone()[0]
             logger.info("server.bulk_reindex_done", remaining=remaining)
 
-        # 7a. Give permanently-failed bodies another chance before the bulk pass.
-        # -1 means "give up forever", but re-running the pass in production
-        # recovered 400 of 417 — they were one-off fetch failures, not bad
-        # messages, and every one of them had been invisible to search since.
-        # Idempotent: anything that fails again is immediately re-marked -1.
+        # 7a. Retry dead-lettered bodies, up to a bounded number of attempts.
+        # -1 alone means "gave up", which is wrong in both directions: 400 of 417
+        # turned out to be one-off fetch failures and recovered on a retry, while
+        # the rest would be re-fetched on every restart forever with no record of
+        # having been tried. body_failures carries the attempt count, so we retry
+        # what is still worth trying and leave the rest visibly dead-lettered.
         if body_indexer:
-            failed_bodies = db.execute(
-                "SELECT COUNT(*) FROM messages WHERE body_indexed = -1"
-            ).fetchone()[0]
-            if failed_bodies:
-                db.execute("UPDATE messages SET body_indexed = 0 WHERE body_indexed = -1")
+            retryable = db.body_failures.retryable_ids(settings.body_max_attempts)
+            if retryable:
+                placeholders = ",".join("?" * len(retryable))
+                db.execute(
+                    f"UPDATE messages SET body_indexed = 0 WHERE pm_id IN ({placeholders})",
+                    retryable,
+                )
                 db.commit()
-                logger.info("server.retry_failed_bodies", count=failed_bodies)
+                logger.info("server.retry_failed_bodies", count=len(retryable))
+
+            dead = db.body_failures.dead_letters(settings.body_max_attempts)
+            if dead:
+                logger.warning(
+                    "server.dead_letter",
+                    count=len(dead),
+                    max_attempts=settings.body_max_attempts,
+                    detail=(
+                        "bodies that could not be fetched or decrypted; absent from "
+                        "search, and no longer retried"
+                    ),
+                )
 
         # 7b. Start bulk body re-index as background task (non-blocking)
         background_tasks.append(_spawn_background(_bulk_reindex_bodies(), "bulk_reindex_bodies"))

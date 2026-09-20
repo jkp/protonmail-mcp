@@ -61,6 +61,7 @@ class BodyIndexer:
                 if parsed_headers is not None:
                     self._store_headers(pm_id, parsed_headers)
                 self._db.messages.mark_body_indexed(pm_id)
+                self._db.body_failures.clear(pm_id)
                 if self._progress:
                     self._progress.advance_bodies()
                 logger.debug("body_indexer.indexed", pm_id=pm_id, attachments=len(attachments))
@@ -73,12 +74,15 @@ class BodyIndexer:
                         error=str(e),
                         attempts=attempt + 1,
                     )
-                    # Mark as permanently failed (-1) so we don't retry forever
+                    # Mark as permanently failed (-1) so we don't retry forever,
+                    # and dead-letter it with the reason so the failure is
+                    # visible rather than just absent from search.
                     self._db.execute(
                         "UPDATE messages SET body_indexed = -1 WHERE pm_id = ?",
                         [pm_id],
                     )
                     self._db.commit()
+                    self._db.body_failures.record(pm_id, str(e))
                 else:
                     logger.debug(
                         "body_indexer.fetch_retry",
@@ -151,11 +155,13 @@ class BodyIndexer:
                 if parsed_headers is not None:
                     self._store_headers(pm_id, parsed_headers)
                 self._db.messages.mark_body_indexed(pm_id)
+                self._db.body_failures.clear(pm_id)
                 indexed += 1
                 if self._progress:
                     self._progress.advance_bodies()
 
-            # Mark failures as -1 so they aren't retried forever
+            # Dead-letter the ones the batch didn't return, with the attempt
+            # counted, so the startup retry can stop after a bounded number.
             failed_ids = set(batch) - set(results.keys())
             for pm_id in failed_ids:
                 self._db.execute(
@@ -164,6 +170,9 @@ class BodyIndexer:
                 )
             if failed_ids:
                 self._db.commit()
+                self._db.body_failures.record_many(
+                    sorted(failed_ids), "batch fetch returned no body (undecryptable)"
+                )
             failed += len(failed_ids)
 
         logger.info(

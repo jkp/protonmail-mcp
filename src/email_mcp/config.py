@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # continues. Slow is acceptable; stalled is not.
     embed_local_fallback: bool = True
 
+    # How many times to re-attempt a body we could not fetch or decrypt before
+    # dead-lettering it. Each server start is one attempt. Without a cap the
+    # retry either gives up too early (hiding recoverable mail) or retries the
+    # same hopeless rows on every restart forever.
+    body_max_attempts: int = 3
+
     @property
     def embed_skip_senders_list(self) -> list[str]:
         return [s.strip() for s in self.embed_skip_senders.split(",") if s.strip()]
