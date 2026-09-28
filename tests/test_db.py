@@ -371,3 +371,60 @@ class TestBodyFailures:
         db.body_failures.clear("pm-1")
         assert db.body_failures.attempts("pm-1") == 0
         assert db.body_failures.dead_letters(0) == []
+
+
+class TestThreads:
+    """The event loop, the embed pool and asyncio.to_thread all use the same
+    Database. One shared sqlite3 connection raised InterfaceError ("bad
+    parameter or other API misuse") under concurrent use and let one thread's
+    commit flush another's half-done writes."""
+
+    @staticmethod
+    def _in_thread(fn):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(fn).result(timeout=5)
+
+    def test_commit_does_not_flush_another_threads_open_write(
+        self, db: Database, tmp_path: Path
+    ) -> None:
+        import sqlite3
+        import threading
+
+        written = threading.Event()
+        finish = threading.Event()
+
+        def worker() -> None:
+            db.execute("INSERT INTO sync_state (key, value) VALUES ('k', 'uncommitted')")
+            written.set()
+            finish.wait(timeout=5)
+            db.execute("ROLLBACK")
+
+        t = threading.Thread(target=worker)
+        t.start()
+        assert written.wait(timeout=5)
+        db.commit()  # the main thread's commit must not reach the worker's write
+
+        outside = sqlite3.connect(str(tmp_path / "test.db"))
+        visible = outside.execute("SELECT value FROM sync_state WHERE key = 'k'").fetchone()
+        outside.close()
+        finish.set()
+        t.join(timeout=5)
+
+        assert visible is None
+
+    def test_worker_thread_connection_is_fully_configured(self, db: Database) -> None:
+        def probe() -> tuple:
+            return (
+                db.execute("PRAGMA foreign_keys").fetchone()[0],
+                db.execute("PRAGMA busy_timeout").fetchone()[0],
+                db.execute("SELECT vec_version()").fetchone()[0],
+                db.messages.get("missing"),
+            )
+
+        fk, busy, vec, missing = self._in_thread(probe)
+        assert fk == 1
+        assert busy == 30000
+        assert vec.startswith("v")
+        assert missing is None
