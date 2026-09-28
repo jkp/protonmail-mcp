@@ -22,6 +22,14 @@ class Attachment(BaseModel):
     size: int = 0
 
 
+class OutgoingAttachment(BaseModel):
+    """A file to attach to an outgoing email."""
+
+    filename: str
+    content_base64: str
+    mime_type: str | None = None  # guessed from filename when omitted
+
+
 class Email(BaseModel):
     message_id: str
     folder: str = ""
