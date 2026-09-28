@@ -263,90 +263,92 @@ class ProtonSender:
         )
         draft_id = draft["Message"]["ID"]
 
-        # Upload attachments to draft (if forwarding). Track each
-        # uploaded attachment's ID + key packet so we can emit
-        # AttachmentKeys for external (Type 4) recipients below — Proton
-        # rejects external sends with code 2001 otherwise.
-        uploaded_atts: list[tuple[str, str]] = []  # (att_id, key_packets_b64)
-        if attachments:
-            for filename, mime_type, content in attachments:
-                key_pkt, data_pkt, sig = self._encrypt_attachment(content, pub_key, from_email)
-                result = await self._api.upload_attachment(
-                    message_id=draft_id,
-                    filename=filename,
-                    mime_type=mime_type,
-                    key_packets=key_pkt,
-                    data_packet=data_pkt,
-                    signature=sig,
+        # Everything after draft creation deletes the draft on failure,
+        # so a failed send never leaves an orphan in Drafts.
+        try:
+            # Upload attachments to the draft. Track each
+            # uploaded attachment's ID + key packet so we can emit
+            # AttachmentKeys for external (Type 4) recipients below — Proton
+            # rejects external sends with code 2001 otherwise.
+            uploaded_atts: list[tuple[str, str]] = []  # (att_id, key_packets_b64)
+            if attachments:
+                for filename, mime_type, content in attachments:
+                    key_pkt, data_pkt, sig = self._encrypt_attachment(content, pub_key, from_email)
+                    result = await self._api.upload_attachment(
+                        message_id=draft_id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        key_packets=key_pkt,
+                        data_packet=data_pkt,
+                        signature=sig,
+                    )
+                    att_id = result.get("ID", "")
+                    if att_id:
+                        uploaded_atts.append((att_id, base64.b64encode(key_pkt).decode()))
+                    logger.info(
+                        "proton.attachment_uploaded",
+                        filename=filename,
+                        size=len(content),
+                    )
+
+            # Raw session keys: re-encrypted per internal recipient, or sent
+            # as-is in the external (clear) package.
+            body_sk, _ = self._key_ring.decrypt_session_key(key_b64)
+            att_sks = {
+                att_id: self._key_ring.decrypt_session_key(att_key_b64)[0]
+                for att_id, att_key_b64 in uploaded_atts
+            }
+
+            # Build packages — one for internal, one for external (if needed)
+            packages: list[dict[str, Any]] = []
+
+            if internal:
+                int_addrs = {}
+                for email, recip_key in internal.items():
+                    int_addrs[email] = {
+                        "Type": 1,
+                        "Signature": 1,
+                        "BodyKeyPacket": self._encrypt_session_key(body_sk, recip_key),
+                        "AttachmentKeyPackets": {
+                            att_id: self._encrypt_session_key(sk, recip_key)
+                            for att_id, sk in att_sks.items()
+                        },
+                    }
+                packages.append(
+                    {
+                        "Addresses": int_addrs,
+                        "Type": 1,
+                        "MIMEType": "text/plain",
+                        "Body": data_b64,
+                    }
                 )
-                att_id = result.get("ID", "")
-                if att_id:
-                    uploaded_atts.append((att_id, base64.b64encode(key_pkt).decode()))
-                logger.info(
-                    "proton.attachment_uploaded",
-                    filename=filename,
-                    size=len(content),
-                )
 
-        # Raw session keys: re-encrypted per internal recipient, or sent
-        # as-is in the external (clear) package.
-        body_sk, _ = self._key_ring.decrypt_session_key(key_b64)
-        att_sks = {
-            att_id: self._key_ring.decrypt_session_key(att_key_b64)[0]
-            for att_id, att_key_b64 in uploaded_atts
-        }
+            if external:
+                session_key_b64 = base64.b64encode(body_sk).decode()
 
-        # Build packages — one for internal, one for external (if needed)
-        packages: list[dict[str, Any]] = []
-
-        if internal:
-            int_addrs = {}
-            for email, recip_key in internal.items():
-                int_addrs[email] = {
-                    "Type": 1,
-                    "Signature": 1,
-                    "BodyKeyPacket": self._encrypt_session_key(body_sk, recip_key),
-                    "AttachmentKeyPackets": {
-                        att_id: self._encrypt_session_key(sk, recip_key)
-                        for att_id, sk in att_sks.items()
-                    },
-                }
-            packages.append(
-                {
-                    "Addresses": int_addrs,
-                    "Type": 1,
+                ext_addrs = {}
+                for email in external:
+                    ext_addrs[email] = {"Type": 4, "Signature": 1}
+                ext_pkg: dict[str, Any] = {
+                    "Addresses": ext_addrs,
+                    "Type": 4,
                     "MIMEType": "text/plain",
                     "Body": data_b64,
+                    "BodyKey": {
+                        "Key": session_key_b64,
+                        "Algorithm": "aes256",
+                    },
                 }
-            )
+                # Per-attachment session keys so the server can ship them as
+                # plaintext MIME parts to non-Proton recipients.
+                if att_sks:
+                    ext_pkg["AttachmentKeys"] = {
+                        att_id: {"Key": base64.b64encode(sk).decode(), "Algorithm": "aes256"}
+                        for att_id, sk in att_sks.items()
+                    }
+                packages.append(ext_pkg)
 
-        if external:
-            session_key_b64 = base64.b64encode(body_sk).decode()
-
-            ext_addrs = {}
-            for email in external:
-                ext_addrs[email] = {"Type": 4, "Signature": 1}
-            ext_pkg: dict[str, Any] = {
-                "Addresses": ext_addrs,
-                "Type": 4,
-                "MIMEType": "text/plain",
-                "Body": data_b64,
-                "BodyKey": {
-                    "Key": session_key_b64,
-                    "Algorithm": "aes256",
-                },
-            }
-            # Per-attachment session keys so the server can ship them as
-            # plaintext MIME parts to non-Proton recipients.
-            if att_sks:
-                ext_pkg["AttachmentKeys"] = {
-                    att_id: {"Key": base64.b64encode(sk).decode(), "Algorithm": "aes256"}
-                    for att_id, sk in att_sks.items()
-                }
-            packages.append(ext_pkg)
-
-        # Send (delete draft on failure to avoid orphaned drafts)
-        try:
+            # Send
             await self._api._request(
                 "POST",
                 f"/mail/v4/messages/{draft_id}",
@@ -354,10 +356,12 @@ class ProtonSender:
             )
         except Exception:
             try:
-                await self._api._request("DELETE", f"/mail/v4/messages/{draft_id}")
+                await self._api._request(
+                    "PUT", "/mail/v4/messages/delete", json={"IDs": [draft_id]}
+                )
                 logger.info("proton.draft_cleaned", draft_id=draft_id)
             except Exception:
-                logger.warning("proton.draft_cleanup_failed", draft_id=draft_id)
+                logger.warning("proton.draft_cleanup_failed", draft_id=draft_id, exc_info=True)
             raise
 
         logger.info("proton.sent", draft_id=draft_id, subject=subject)
