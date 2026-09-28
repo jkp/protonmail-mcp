@@ -341,3 +341,52 @@ async def test_failed_attachment_upload_deletes_draft(mock_api, mock_key_ring):
         await sender.send(_external_msg(), attachments=[("a.txt", "text/plain", b"a")])
 
     assert mock_api._request.call_args_list[-1] == _DELETE_DRAFT
+
+
+def _two_address_sender(mock_api, mock_key_ring):
+    sender = _make_sender(mock_api, mock_key_ring)
+    sender._addresses = [
+        {"ID": "addr-alias", "Email": "alias@protonmail.com", "Order": 2, "Status": 1},
+        {"ID": "addr-off", "Email": "old@protonmail.com", "Order": 0, "Status": 0},
+        {"ID": "addr-main", "Email": "bob@protonmail.com", "Order": 1, "Status": 1},
+    ]
+    sender._address_keys = {
+        "alias@protonmail.com": MagicMock(),
+        "old@protonmail.com": MagicMock(),
+        "bob@protonmail.com": MagicMock(),
+    }
+    return sender
+
+
+async def test_send_without_from_uses_primary_address(mock_api, mock_key_ring):
+    """No configured/explicit sender → the account's primary enabled address,
+    not a failed lookup of the empty string."""
+    mock_api._request = AsyncMock(
+        side_effect=[{"RecipientType": 2}, {"Message": {"ID": "draft-1"}}, {"Code": 1000}]
+    )
+    sender = _two_address_sender(mock_api, mock_key_ring)
+
+    msg = EmailMessage()
+    msg["From"] = ""
+    msg["To"] = "ferdi@outlook.com"
+    msg["Subject"] = "x"
+    msg.set_content("x")
+    await sender.send(msg)
+
+    draft = mock_api._request.call_args_list[1].kwargs["json"]["Message"]
+    assert draft["AddressID"] == "addr-main"
+    assert draft["Sender"]["Address"] == "bob@protonmail.com"
+
+
+async def test_send_from_unknown_address_names_the_valid_ones(mock_api, mock_key_ring):
+    sender = _two_address_sender(mock_api, mock_key_ring)
+
+    msg = EmailMessage()
+    msg["From"] = "nope@example.com"
+    msg["To"] = "ferdi@outlook.com"
+    msg.set_content("x")
+
+    with pytest.raises(ValueError, match="nope@example.com") as exc:
+        await sender.send(msg)
+    assert "bob@protonmail.com" in str(exc.value)
+    assert "alias@protonmail.com" in str(exc.value)
