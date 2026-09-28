@@ -4,7 +4,9 @@ import base64
 from email.message import EmailMessage
 from unittest.mock import AsyncMock, MagicMock
 
+import pgpy
 import pytest
+from pgpy.constants import HashAlgorithm, KeyFlags, PubKeyAlgorithm, SymmetricKeyAlgorithm
 
 from email_mcp.sender import ProtonSender, _split_pgp_packets
 
@@ -41,6 +43,34 @@ def mock_api():
     return api
 
 
+_BODY_SK = b"\x01" * 32
+_ATT_SK = b"\x02" * 32
+_FAKE_ATT_KEY_RAW = b"\xc1\x02\xaa\xbb"
+
+
+@pytest.fixture(scope="module")
+def recipient_key() -> pgpy.PGPKey:
+    key = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
+    key.add_uid(
+        pgpy.PGPUID.new("Alice", email="alice@protonmail.com"),
+        usage={KeyFlags.EncryptCommunications, KeyFlags.EncryptStorage},
+        hashes=[HashAlgorithm.SHA256],
+        ciphers=[SymmetricKeyAlgorithm.AES256],
+    )
+    return key
+
+
+def _internal_lookup(key: pgpy.PGPKey) -> dict:
+    return {"RecipientType": 1, "Keys": [{"Flags": 3, "PublicKey": str(key.pubkey)}]}
+
+
+def _session_key_in(packet_b64: str, key: pgpy.PGPKey) -> bytes:
+    """Decrypt a base64 PKESK packet with the recipient's private key."""
+    msg = pgpy.PGPMessage.from_blob(base64.b64decode(packet_b64))
+    _, session_key = msg._sessionkeys[0].decrypt_sk(key._key)
+    return bytes(session_key)
+
+
 def _make_sender(mock_api, mock_key_ring):
     """Create a ProtonSender with pre-loaded addresses and mocked sign+encrypt."""
     sender = ProtonSender(api=mock_api, key_ring=mock_key_ring)
@@ -71,11 +101,12 @@ def test_split_pgp_packets_separates_key_and_data():
     assert data_raw == seipd
 
 
-async def test_send_internal_recipient(mock_api, mock_key_ring):
-    """Internal recipients get Type 1 package with BodyKeyPacket."""
+async def test_send_internal_recipient(mock_api, mock_key_ring, recipient_key):
+    """Internal recipients get the body session key encrypted to their own key."""
+    mock_key_ring.decrypt_session_key = MagicMock(return_value=(_BODY_SK, MagicMock()))
     mock_api._request = AsyncMock(
         side_effect=[
-            {"RecipientType": 1},  # key lookup
+            _internal_lookup(recipient_key),  # key lookup
             {"Message": {"ID": "draft-456"}},  # create draft
             {"Code": 1000},  # send
         ]
@@ -95,8 +126,9 @@ async def test_send_internal_recipient(mock_api, mock_key_ring):
     send_call = mock_api._request.call_args_list[2]
     pkg = send_call.kwargs["json"]["Packages"][0]
     assert pkg["Type"] == 1
-    assert "BodyKeyPacket" in pkg["Addresses"]["alice@protonmail.com"]
-    assert pkg["Addresses"]["alice@protonmail.com"]["Signature"] == 1
+    alice = pkg["Addresses"]["alice@protonmail.com"]
+    assert alice["Signature"] == 1
+    assert _session_key_in(alice["BodyKeyPacket"], recipient_key) == _BODY_SK
 
 
 async def test_send_external_recipient(mock_api, mock_key_ring):
@@ -173,16 +205,22 @@ async def test_send_external_with_attachments_includes_attachment_keys(mock_api,
     assert att_keys["att-1"]["Key"] == base64.b64encode(b"\x00" * 32).decode()
 
 
-async def test_send_internal_with_attachments_does_not_emit_attachment_keys(
-    mock_api, mock_key_ring
+async def test_send_internal_with_attachments_emits_attachment_key_packets(
+    mock_api, mock_key_ring, recipient_key
 ):
-    """Internal (Type 1) packages don't use AttachmentKeys — the server
-    re-encrypts using the per-attachment KeyPackets stored on the draft.
-    Including AttachmentKeys here would be at best ignored and at worst
-    surface a session key to internal recipients unnecessarily."""
+    """Internal recipients need each attachment's session key encrypted to
+    their key (AttachmentKeyPackets); Proton rejects the send with 2001
+    'Key packet missing' otherwise. AttachmentKeys is for clear (external)
+    packages only."""
+    mock_key_ring.decrypt_session_key = MagicMock(
+        side_effect=lambda b64: (
+            (_ATT_SK if base64.b64decode(b64) == _FAKE_ATT_KEY_RAW else _BODY_SK),
+            MagicMock(),
+        )
+    )
     mock_api._request = AsyncMock(
         side_effect=[
-            {"RecipientType": 1},  # internal
+            _internal_lookup(recipient_key),
             {"Message": {"ID": "draft-456"}},
             {"Code": 1000},
         ]
@@ -191,7 +229,7 @@ async def test_send_internal_with_attachments_does_not_emit_attachment_keys(
 
     sender = _make_sender(mock_api, mock_key_ring)
     sender._encrypt_attachment = MagicMock(
-        return_value=(b"\xc1\x02\xaa\xbb", b"\xd2\x03\x01\x02\x03", b"sig")
+        return_value=(_FAKE_ATT_KEY_RAW, b"\xd2\x03\x01\x02\x03", b"sig")
     )
 
     msg = EmailMessage()
@@ -210,6 +248,26 @@ async def test_send_internal_with_attachments_does_not_emit_attachment_keys(
     pkg = send_call.kwargs["json"]["Packages"][0]
     assert pkg["Type"] == 1
     assert "AttachmentKeys" not in pkg
+    packets = pkg["Addresses"]["alice@protonmail.com"]["AttachmentKeyPackets"]
+    assert set(packets) == {"att-2"}
+    assert _session_key_in(packets["att-2"], recipient_key) == _ATT_SK
+
+
+async def test_send_internal_recipient_without_keys_fails_before_draft(mock_api, mock_key_ring):
+    """No public key for an internal recipient → refuse rather than send
+    mail they cannot decrypt."""
+    mock_api._request = AsyncMock(side_effect=[{"RecipientType": 1, "Keys": []}])
+
+    sender = _make_sender(mock_api, mock_key_ring)
+    msg = EmailMessage()
+    msg["From"] = "Bob <bob@protonmail.com>"
+    msg["To"] = "alice@protonmail.com"
+    msg["Subject"] = "x"
+    msg.set_content("x")
+
+    with pytest.raises(ValueError, match="alice@protonmail.com"):
+        await sender.send(msg)
+    assert mock_api._request.await_count == 1
 
 
 async def test_send_not_initialized_returns_error(mock_key_ring):
