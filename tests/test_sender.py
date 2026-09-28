@@ -2,7 +2,7 @@
 
 import base64
 from email.message import EmailMessage
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pgpy
 import pytest
@@ -294,3 +294,50 @@ def test_parse_recipients():
 
 def test_parse_recipients_empty():
     assert ProtonSender._parse_recipients("") == []
+
+
+def _external_msg() -> EmailMessage:
+    msg = EmailMessage()
+    msg["From"] = "Bob <bob@protonmail.com>"
+    msg["To"] = "ferdi@outlook.com"
+    msg["Subject"] = "x"
+    msg.set_content("x")
+    return msg
+
+
+_DELETE_DRAFT = call("PUT", "/mail/v4/messages/delete", json={"IDs": ["draft-1"]})
+
+
+async def test_failed_send_deletes_draft(mock_api, mock_key_ring):
+    mock_api._request = AsyncMock(
+        side_effect=[
+            {"RecipientType": 2},
+            {"Message": {"ID": "draft-1"}},
+            RuntimeError("send rejected"),
+            {"Code": 1001},
+        ]
+    )
+    sender = _make_sender(mock_api, mock_key_ring)
+
+    with pytest.raises(RuntimeError, match="send rejected"):
+        await sender.send(_external_msg())
+
+    assert mock_api._request.call_args_list[-1] == _DELETE_DRAFT
+
+
+async def test_failed_attachment_upload_deletes_draft(mock_api, mock_key_ring):
+    mock_api._request = AsyncMock(
+        side_effect=[
+            {"RecipientType": 2},
+            {"Message": {"ID": "draft-1"}},
+            {"Code": 1001},
+        ]
+    )
+    mock_api.upload_attachment = AsyncMock(side_effect=RuntimeError("upload failed"))
+    sender = _make_sender(mock_api, mock_key_ring)
+    sender._encrypt_attachment = MagicMock(return_value=(_FAKE_ATT_KEY_RAW, b"\xd2\x01\x00", b"s"))
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        await sender.send(_external_msg(), attachments=[("a.txt", "text/plain", b"a")])
+
+    assert mock_api._request.call_args_list[-1] == _DELETE_DRAFT
