@@ -283,12 +283,6 @@ class Embedder:
 
     def _ensure_table(self) -> None:
         """Create the vectors table if it doesn't exist."""
-        import sqlite_vec
-
-        self._db._conn.enable_load_extension(True)
-        sqlite_vec.load(self._db._conn)
-        self._db._conn.enable_load_extension(False)
-
         # Recreate table if it has the old pm_id-only schema
         # New schema uses chunk_id (pm_id:chunk_index) as primary key
         try:

@@ -36,7 +36,7 @@ class TestListEmails:
         if not emails:
             pytest.skip("No emails in INBOX to validate")
         for email in emails:
-            assert "message_id" in email
+            assert "id" in email
             assert "from" in email
             assert "subject" in email
             assert "date" in email
@@ -57,7 +57,7 @@ class TestReadEmail:
             pytest.skip("No emails in INBOX")
 
         result = await live_client.call_tool(
-            "read_email", {"message_id": emails[0]["message_id"], "folder": "INBOX"}
+            "read_email", {"id": emails[0]["id"], "folder": "INBOX"}
         )
         data = _parse_result(result)
         assert data["subject"]
@@ -74,7 +74,7 @@ class TestReadEmail:
 
         for email in emails[:5]:
             read_result = await live_client.call_tool(
-                "read_email", {"message_id": email["message_id"], "folder": "INBOX"}
+                "read_email", {"id": email["id"], "folder": "INBOX"}
             )
             data = _parse_result(read_result)
             body = data["body"]
@@ -96,12 +96,12 @@ class TestReadEmail:
         for email in emails:
             try:
                 read_result = await live_client.call_tool(
-                    "read_email", {"message_id": email["message_id"], "folder": "INBOX"}
+                    "read_email", {"id": email["id"], "folder": "INBOX"}
                 )
                 data = _parse_result(read_result)
                 if "error" in data:
-                    failures.append(f"{email['message_id']}: {data['error']}")
+                    failures.append(f"{email['id']}: {data['error']}")
             except Exception as e:
-                failures.append(f"{email['message_id']}: {e}")
+                failures.append(f"{email['id']}: {e}")
 
         assert not failures, "Failed to read:\n" + "\n".join(failures)

@@ -69,6 +69,24 @@ def _make_message_event(
     return event
 
 
+def _make_row(pm_id: str) -> MessageRow:
+    return MessageRow(
+        pm_id=pm_id,
+        message_id=f"<{pm_id}@ex.com>",
+        subject="X",
+        sender_name="A",
+        sender_email="a@ex.com",
+        recipients=[],
+        date=int(time.time()),
+        unread=True,
+        label_ids=["0"],
+        folder="INBOX",
+        size=0,
+        has_attachments=False,
+        body_indexed=False,
+    )
+
+
 class TestInitialSetup:
     async def test_initialises_event_id_from_api(self, loop: EventLoop, db: Database) -> None:
         await loop.initialise()
@@ -254,6 +272,35 @@ class TestMessageUpdate:
         event = _make_message_event("pm-001", action=3, label_ids=["0"], unread=0)
         await loop._handle_message_event(event)
         assert db.messages.get("pm-001").unread is False
+
+    async def test_update_flags_is_committed(
+        self, loop: EventLoop, db: Database, tmp_path: Path
+    ) -> None:
+        """Left uncommitted, the update holds SQLite's write lock and stalls
+        writers on other threads' connections (the embedder)."""
+        import sqlite3
+
+        db.messages.upsert(_make_row("pm-001"))
+        event = _make_message_event("pm-001", action=3, label_ids=["0"], unread=0)
+        await loop._handle_message_event(event)
+
+        outside = sqlite3.connect(str(tmp_path / "test.db"))
+        unread = outside.execute("SELECT unread FROM messages WHERE pm_id = 'pm-001'").fetchone()
+        outside.close()
+        assert unread == (0,)
+
+    async def test_label_delete_is_committed(
+        self, loop: EventLoop, db: Database, tmp_path: Path
+    ) -> None:
+        import sqlite3
+
+        db.labels.upsert(id="L1", name="Custom", type=1, color=None, order=0)
+        await loop._handle_label_event({"ID": "L1", "Action": 0})
+
+        outside = sqlite3.connect(str(tmp_path / "test.db"))
+        row = outside.execute("SELECT id FROM labels WHERE id = 'L1'").fetchone()
+        outside.close()
+        assert row is None
 
 
 class TestPollOnce:

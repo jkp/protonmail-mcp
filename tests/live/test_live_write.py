@@ -63,7 +63,7 @@ class TestSend:
         # Attachment metadata lands once the body indexer has processed the message
         for _ in range(18):
             atts = _parse_result(
-                await live_client.call_tool("list_attachments", {"message_id": email["message_id"]})
+                await live_client.call_tool("list_attachments", {"id": email["id"]})
             )
             if isinstance(atts, list) and any(a.get("filename") == "roundtrip.txt" for a in atts):
                 break
@@ -73,7 +73,7 @@ class TestSend:
             pytest.fail(f"Attachment never indexed: {atts}")
 
         dl = await live_client.call_tool(
-            "download_attachment", {"message_id": email["message_id"], "filename": "roundtrip.txt"}
+            "download_attachment", {"id": email["id"], "filename": "roundtrip.txt"}
         )
         assert payload in dl.content[0].text
 
@@ -95,14 +95,14 @@ class TestReply:
         result = await live_client.call_tool(
             "reply",
             {
-                "message_id": email["message_id"],
+                "id": email["id"],
                 "body": "This is a reply.",
                 "folder": "INBOX",
             },
         )
         data = _parse_result(result)
         assert data["status"] == "sent"
-        assert data["in_reply_to"] == email["message_id"]
+        assert data["in_reply_to"] == email["id"]
 
 
 class TestForward:
@@ -122,7 +122,7 @@ class TestForward:
         result = await live_client.call_tool(
             "forward",
             {
-                "message_id": email["message_id"],
+                "id": email["id"],
                 "to": SELF_ADDR,
                 "body": "Forwarding this to you.",
                 "folder": "INBOX",
