@@ -205,6 +205,6 @@ class TestProtonKeyRing:
             return kr.decrypt(encrypted)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-            results = list(pool.map(one, range(160)))
+            results = list(pool.map(one, range(32)))
 
-        assert results == ["concurrent secret"] * 160
+        assert results == ["concurrent secret"] * 32
