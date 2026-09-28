@@ -609,3 +609,46 @@ class TestHFEncode:
 
         emb.embed_batch(["pm-1"], use_api=True)
         assert calls["hf"] == 1
+
+
+class TestLocalModelThreadSafety:
+    def test_concurrent_encode_loads_and_runs_model_serially(self, db):
+        """warmup and embed_batch run in different executor threads. Two
+        unguarded lazy loads (or concurrent encodes) crash torch on macOS
+        Metal, so local model use must be serialized."""
+        import threading
+
+        loading = threading.Event()
+        release = threading.Event()
+        second_entry = threading.Event()
+        calls = []
+
+        model = MagicMock()
+        model.encode = MagicMock(return_value=np.zeros((1, 1024), dtype=np.float32))
+
+        def slow_load(_name):
+            calls.append("load")
+            if len(calls) > 1:
+                second_entry.set()
+            loading.set()
+            release.wait(timeout=5)
+            return model
+
+        e = Embedder(db=db, model=None)
+        e._load_local_model = slow_load
+
+        a = threading.Thread(target=e._encode_local, args=(["a"],))
+        a.start()
+        assert loading.wait(timeout=5)
+        b = threading.Thread(target=e._encode_local, args=(["b"],))
+        b.start()
+
+        # Unguarded, b re-enters the loader; guarded, it waits on the lock.
+        raced = second_entry.wait(timeout=0.5)
+        release.set()
+        a.join(timeout=5)
+        b.join(timeout=5)
+
+        assert not raced
+        assert calls == ["load"]
+        assert model.encode.call_count == 2

@@ -1,5 +1,8 @@
 """Live write tests (send, reply, forward) against Protonmail Bridge."""
 
+import asyncio
+import base64
+
 import pytest
 from fastmcp import Client
 
@@ -32,6 +35,47 @@ class TestSend:
 
         email = await poll_for_email(live_client, subject)
         assert email is not None, f"Email '{subject}' never arrived in INBOX"
+
+    async def test_send_to_self_with_attachment(self, live_client: Client) -> None:
+        subject = make_subject("send_with_attachment")
+        payload = f"attachment round-trip {subject}"
+        result = await live_client.call_tool(
+            "send",
+            {
+                "to": SELF_ADDR,
+                "subject": subject,
+                "body": "Live test: send with attachment.",
+                "attachments": [
+                    {
+                        "filename": "roundtrip.txt",
+                        "content_base64": base64.b64encode(payload.encode()).decode(),
+                    }
+                ],
+            },
+        )
+        data = _parse_result(result)
+        assert data["status"] == "sent"
+        assert data["attachments"] == ["roundtrip.txt"]
+
+        email = await poll_for_email(live_client, subject)
+        assert email is not None, f"Email '{subject}' never arrived in INBOX"
+
+        # Attachment metadata lands once the body indexer has processed the message
+        for _ in range(18):
+            atts = _parse_result(
+                await live_client.call_tool("list_attachments", {"message_id": email["message_id"]})
+            )
+            if isinstance(atts, list) and any(a.get("filename") == "roundtrip.txt" for a in atts):
+                break
+            await live_client.call_tool("sync_now", {})
+            await asyncio.sleep(5)
+        else:
+            pytest.fail(f"Attachment never indexed: {atts}")
+
+        dl = await live_client.call_tool(
+            "download_attachment", {"message_id": email["message_id"], "filename": "roundtrip.txt"}
+        )
+        assert payload in dl.content[0].text
 
 
 class TestReply:

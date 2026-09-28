@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import struct
+import threading
 from typing import Any
 
 import numpy as np
@@ -116,6 +117,10 @@ class Embedder:
         self._rerank_api_url = rerank_api_url
         self._local_model = model  # None = lazy-load on first search
         self._reranker = None  # Lazy-load on first search
+        # Serializes local model load + inference: warmup, embed_batch and
+        # search run in different executor threads, and torch (Metal on macOS)
+        # crashes when two of them touch a model at once.
+        self._local_lock = threading.RLock()
         self._skip_senders = [s.lower() for s in (skip_senders or [])]
         self._skip_domains = [d.lower() for d in (skip_domains or [])]
         self._local_fallback = local_fallback
@@ -232,29 +237,34 @@ class Embedder:
                 self._encode_via_hf(["warmup"])
             except Exception:
                 logger.warning("embedder.warmup.hf_embed_failed", exc_info=True)
-        elif self._local_model is None:
-            logger.info("embedder.warmup.embedding_model")
-            self._local_model = self._load_local_model(self._model_name)
+        else:
+            with self._local_lock:
+                if self._local_model is None:
+                    logger.info("embedder.warmup.embedding_model")
+                    self._local_model = self._load_local_model(self._model_name)
 
         if use_hf_rerank:
             try:
                 self._rerank_via_hf([["warmup", "warmup"]])
             except Exception:
                 logger.warning("embedder.warmup.hf_rerank_failed", exc_info=True)
-        elif self._reranker is None:
-            from sentence_transformers import CrossEncoder
+        else:
+            with self._local_lock:
+                if self._reranker is None:
+                    from sentence_transformers import CrossEncoder
 
-            logger.info("embedder.warmup.reranker")
-            self._reranker = CrossEncoder(_RERANKER_MODEL)
+                    logger.info("embedder.warmup.reranker")
+                    self._reranker = CrossEncoder(_RERANKER_MODEL)
 
         logger.info("embedder.warmup.done", hf_embed=use_hf_embed, hf_rerank=use_hf_rerank)
 
     def _encode_local(self, texts: list[str]) -> np.ndarray:
         """Encode texts using local model. Lazy-loads on first call."""
-        if self._local_model is None:
-            logger.info("embedder.loading_local_model")
-            self._local_model = self._load_local_model(self._model_name)
-        return self._local_model.encode(texts, batch_size=_BATCH_SIZE, show_progress_bar=False)
+        with self._local_lock:
+            if self._local_model is None:
+                logger.info("embedder.loading_local_model")
+                self._local_model = self._load_local_model(self._model_name)
+            return self._local_model.encode(texts, batch_size=_BATCH_SIZE, show_progress_bar=False)
 
     def _encode_query(self, texts: list[str]) -> np.ndarray:
         """Encode a search query, preferring the HF API over the local model.
@@ -577,9 +587,10 @@ class Embedder:
                 logger.warning("embedder.rerank_fallback_order", exc_info=True)
                 return [(float(len(candidates) - i), m) for i, m in enumerate(candidates)]
 
-        self._ensure_reranker()
-        assert self._reranker is not None
-        scores = self._reranker.predict(pairs)
+        with self._local_lock:
+            self._ensure_reranker()
+            assert self._reranker is not None
+            scores = self._reranker.predict(pairs)
         return sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
 
     def rerank(self, query: str, results: list, db: Any) -> list:

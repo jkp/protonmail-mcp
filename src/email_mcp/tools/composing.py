@@ -1,5 +1,8 @@
 """Composing tools: send, reply, forward using ProtonMail API."""
 
+import base64
+import binascii
+import mimetypes
 from datetime import UTC
 from email.message import EmailMessage
 from typing import Any
@@ -8,7 +11,7 @@ import structlog
 
 from email_mcp.composer import build_forward, build_new, build_reply
 from email_mcp.db import resolve_message
-from email_mcp.models import Address
+from email_mcp.models import Address, OutgoingAttachment
 from email_mcp.sender import ProtonSender
 from email_mcp.server import db, mcp, settings
 
@@ -60,6 +63,25 @@ def _build_original_email(identifier: int | str) -> tuple[EmailMessage, str] | t
     return email, msg_row.pm_id
 
 
+def _decode_attachments(
+    attachments: list[OutgoingAttachment] | None,
+) -> list[tuple[str, str, bytes]] | None:
+    """Decode tool-supplied attachments into (filename, mime_type, bytes) for the sender."""
+    if not attachments:
+        return None
+    decoded = []
+    for att in attachments:
+        try:
+            content = base64.b64decode(att.content_base64, validate=True)
+        except binascii.Error as e:
+            raise ValueError(f"Attachment {att.filename!r} is not valid base64: {e}") from e
+        mime_type = (
+            att.mime_type or mimetypes.guess_type(att.filename)[0] or "application/octet-stream"
+        )
+        decoded.append((att.filename, mime_type, content))
+    return decoded
+
+
 def _resolve_from(from_address: str | None = None) -> Address:
     """Resolve the sender address, using override or default."""
     if from_address:
@@ -74,6 +96,7 @@ async def send(
     body: str,
     cc: str | None = None,
     from_address: str | None = None,
+    attachments: list[OutgoingAttachment] | None = None,
 ) -> dict[str, Any]:
     """Send a new email.
 
@@ -83,19 +106,29 @@ async def send(
         body: Email body text
         cc: CC recipients (comma-separated)
         from_address: Sender email address (defaults to configured from_address)
+        attachments: Files to attach, each with filename and base64-encoded content
     """
     if _sender is None:
         return {"error": "Sender not initialized — ProtonMail API not available."}
+    try:
+        files = _decode_attachments(attachments)
+    except ValueError as e:
+        return {"error": str(e)}
     sender = _resolve_from(from_address)
-    logger.info("tool.send", to=to, subject=subject, cc=cc, from_=sender.addr)
+    logger.info(
+        "tool.send", to=to, subject=subject, cc=cc, from_=sender.addr, attachments=len(files or [])
+    )
     try:
         msg = build_new(sender, to, subject, body, cc)
-        await _sender.send(msg)
+        await _sender.send(msg, attachments=files)
     except Exception as e:
         logger.error("tool.send.failed", to=to, error=str(e), exc_info=True)
         return {"error": f"Send failed: {e}"}
     logger.info("tool.send.done", to=to, subject=subject)
-    return {"status": "sent", "to": to, "subject": subject}
+    result: dict[str, Any] = {"status": "sent", "to": to, "subject": subject}
+    if files:
+        result["attachments"] = [f[0] for f in files]
+    return result
 
 
 @mcp.tool(annotations={"destructiveHint": False, "title": "Reply to Email"})
@@ -106,6 +139,7 @@ async def reply(
     folder: str | None = None,
     reply_all: bool = False,
     from_address: str | None = None,
+    attachments: list[OutgoingAttachment] | None = None,
 ) -> dict[str, Any]:
     """Reply to an email.
 
@@ -116,12 +150,17 @@ async def reply(
         folder: Optional folder hint
         reply_all: Whether to reply to all recipients
         from_address: Sender email address (defaults to configured from_address)
+        attachments: Files to attach, each with filename and base64-encoded content
     """
     id = id or message_id
     if id is None:
         return {"error": "missing_id", "detail": "Provide id or message_id."}
     if _sender is None:
         return {"error": "Sender not initialized — ProtonMail API not available."}
+    try:
+        files = _decode_attachments(attachments)
+    except ValueError as e:
+        return {"error": str(e)}
     sender = _resolve_from(from_address)
     logger.info("tool.reply", id=id, reply_all=reply_all, from_=sender.addr)
 
@@ -133,6 +172,7 @@ async def reply(
         msg = build_reply(original, body, sender, reply_all)
         await _sender.send(
             msg,
+            attachments=files,
             parent_id=pm_id,
             action=1 if reply_all else 0,
         )
