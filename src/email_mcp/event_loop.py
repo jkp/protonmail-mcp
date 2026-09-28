@@ -135,7 +135,7 @@ class EventLoop:
                     "UPDATE messages SET unread = ?, updated_at = unixepoch() WHERE pm_id = ?",
                     [int(msg.get("Unread", existing.unread)), pm_id],
                 )
-                self._db.execute("COMMIT") if False else None  # already auto-committed
+                self._db.commit()
                 logger.debug("event_loop.message_updated", pm_id=pm_id, folder=folder)
             else:
                 # Message not in local DB — treat as create
@@ -148,7 +148,7 @@ class EventLoop:
         if action == _ACTION_DELETE:
             label_id = event["ID"]
             self._db.execute("DELETE FROM labels WHERE id = ?", [label_id])
-            self._db.execute("COMMIT") if False else None
+            self._db.commit()
         else:
             label = event.get("Label", {})
             self._db.labels.upsert(
