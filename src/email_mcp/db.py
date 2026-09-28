@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,12 +22,6 @@ from typing import Any
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
--- One connection is shared across threads (check_same_thread=False): the event
--- loop and the embedder's worker thread both write. WAL admits one writer at a
--- time, so without a busy timeout a collision surfaces immediately as
--- "database is locked" rather than waiting its turn.
-PRAGMA busy_timeout = 30000;
 
 CREATE TABLE IF NOT EXISTS messages (
     pm_id           TEXT PRIMARY KEY,
@@ -154,10 +149,16 @@ class MessageRow:
 # ── Accessors ────────────────────────────────────────────────────────────────
 
 
-class _SyncStateAccessor:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
+class _Accessor:
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._db._conn
+
+
+class _SyncStateAccessor(_Accessor):
     def get(self, key: str, default: str | None = None) -> str | None:
         row = self._conn.execute("SELECT value FROM sync_state WHERE key = ?", [key]).fetchone()
         return row[0] if row else default
@@ -170,10 +171,7 @@ class _SyncStateAccessor:
         self._conn.commit()
 
 
-class _MessagesAccessor:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
+class _MessagesAccessor(_Accessor):
     def upsert(self, row: MessageRow) -> None:
         now = int(time.time())
         self._conn.execute(
@@ -281,10 +279,7 @@ class _MessagesAccessor:
         return {"total": rows[0] or 0, "unread": rows[1] or 0}
 
 
-class _BodiesAccessor:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
+class _BodiesAccessor(_Accessor):
     def insert(self, pm_id: str, body: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO message_bodies (pm_id, body) VALUES (?, ?)",
@@ -310,11 +305,8 @@ class _BodiesAccessor:
             return []
 
 
-class _BodyFailuresAccessor:
+class _BodyFailuresAccessor(_Accessor):
     """Dead-letter records for bodies that could not be fetched or decrypted."""
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
 
     def record(self, pm_id: str, error: str) -> None:
         """Note a failure, incrementing that message's attempt count."""
@@ -370,10 +362,7 @@ class _BodyFailuresAccessor:
         return [(r[0], r[1], r[2]) for r in rows]
 
 
-class _AttachmentsAccessor:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
+class _AttachmentsAccessor(_Accessor):
     def upsert_for_message(self, pm_id: str, attachments: list[dict[str, Any]]) -> None:
         """Replace all attachment records for a message."""
         self._conn.execute("DELETE FROM attachments WHERE pm_id = ?", [pm_id])
@@ -441,10 +430,7 @@ class _AttachmentsAccessor:
         return [r[0] for r in rows]
 
 
-class _LabelsAccessor:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
+class _LabelsAccessor(_Accessor):
     def upsert(
         self, id: str, name: str, type: int, color: str | None = None, order: int | None = None
     ) -> None:
@@ -488,16 +474,46 @@ class Database:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._path = path
+        # One connection per thread: the event loop, the embed pool and
+        # asyncio.to_thread workers all use this Database. A shared sqlite3
+        # connection is not safe for that (InterfaceError, and one thread's
+        # commit flushing another's half-done writes). WAL lets the
+        # connections read concurrently; busy_timeout queues their writes.
+        self._local = threading.local()
+        self._conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
         self._apply_schema()
 
-        self.sync_state = _SyncStateAccessor(self._conn)
-        self.messages = _MessagesAccessor(self._conn)
-        self.bodies = _BodiesAccessor(self._conn)
-        self.body_failures = _BodyFailuresAccessor(self._conn)
-        self.attachments = _AttachmentsAccessor(self._conn)
-        self.labels = _LabelsAccessor(self._conn)
+        self.sync_state = _SyncStateAccessor(self)
+        self.messages = _MessagesAccessor(self)
+        self.bodies = _BodiesAccessor(self)
+        self.body_failures = _BodyFailuresAccessor(self)
+        self.attachments = _AttachmentsAccessor(self)
+        self.labels = _LabelsAccessor(self)
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._local.conn = self._connect()
+        return conn
+
+    def _connect(self) -> sqlite3.Connection:
+        import sqlite_vec
+
+        # check_same_thread=False only so close() can close every thread's
+        # connection; each is otherwise used by its own thread alone.
+        conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        with self._conns_lock:
+            self._conns.append(conn)
+        return conn
 
     def execute(self, sql: str, params: list[Any] | None = None) -> sqlite3.Cursor:
         return self._conn.execute(sql, params or [])
@@ -506,7 +522,11 @@ class Database:
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._conns_lock:
+            for conn in self._conns:
+                conn.close()
+            self._conns.clear()
+        self._local = threading.local()
 
     def _apply_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
