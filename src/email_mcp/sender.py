@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pgpy
 import structlog
+from pgpy.constants import CompressionAlgorithm, SymmetricKeyAlgorithm
 
 from email_mcp.proton_api import ProtonClient
 
@@ -107,16 +108,38 @@ class ProtonSender:
                     return addr, pub
         raise ValueError(f"No ProtonMail address found for {from_email}")
 
-    async def _classify_recipients(self, addresses: list[str]) -> dict[str, int]:
-        """Classify recipients as internal (1) or external (2) via API key lookup."""
-        result: dict[str, int] = {}
+    async def _classify_recipients(self, addresses: list[str]) -> dict[str, pgpy.PGPKey | None]:
+        """Look up recipients: internal (Proton) ones map to their encryption
+        public key, external ones to None."""
+        result: dict[str, pgpy.PGPKey | None] = {}
         for email in addresses:
             try:
                 data = await self._api._request("GET", "/core/v4/keys", params={"Email": email})
-                result[email] = data.get("RecipientType", 2)
             except Exception:
-                result[email] = 2
+                result[email] = None
+                continue
+            if data.get("RecipientType", 2) != 1:
+                result[email] = None
+                continue
+            # Flags bit 2 = key may be used for encryption
+            keys = [k for k in data.get("Keys", []) if k.get("Flags", 0) & 2]
+            if not keys:
+                raise ValueError(f"No encryption key published for Proton recipient {email}")
+            pub, _ = pgpy.PGPKey.from_blob(keys[0]["PublicKey"])
+            result[email] = pub
         return result
+
+    @staticmethod
+    def _encrypt_session_key(session_key: bytes, pub_key: pgpy.PGPKey) -> str:
+        """Encrypt a session key to a recipient's key; returns the base64 key packet."""
+        # Proton session keys are AES-256 (the external BodyKey path assumes the same)
+        encrypted = pub_key.encrypt(
+            pgpy.PGPMessage.new(b"", encoding=None, compression=CompressionAlgorithm.Uncompressed),
+            sessionkey=session_key,
+            cipher=SymmetricKeyAlgorithm.AES256,
+        )
+        key_raw, _ = _split_pgp_packets(encrypted)
+        return base64.b64encode(key_raw).decode()
 
     def _sign_encrypt_body(
         self, body_text: str, pub_key: pgpy.PGPKey, from_email: str = ""
@@ -194,10 +217,10 @@ class ProtonSender:
 
         # Classify recipients
         all_emails = [r["Address"] for r in all_recips]
-        recip_types = await self._classify_recipients(all_emails)
+        recip_keys = await self._classify_recipients(all_emails)
 
-        internal = [e for e, t in recip_types.items() if t == 1]
-        external = [e for e, t in recip_types.items() if t != 1]
+        internal = {e: k for e, k in recip_keys.items() if k is not None}
+        external = [e for e, k in recip_keys.items() if k is None]
 
         logger.info(
             "proton.sending",
@@ -265,16 +288,28 @@ class ProtonSender:
                     size=len(content),
                 )
 
+        # Raw session keys: re-encrypted per internal recipient, or sent
+        # as-is in the external (clear) package.
+        body_sk, _ = self._key_ring.decrypt_session_key(key_b64)
+        att_sks = {
+            att_id: self._key_ring.decrypt_session_key(att_key_b64)[0]
+            for att_id, att_key_b64 in uploaded_atts
+        }
+
         # Build packages — one for internal, one for external (if needed)
         packages: list[dict[str, Any]] = []
 
         if internal:
             int_addrs = {}
-            for email in internal:
+            for email, recip_key in internal.items():
                 int_addrs[email] = {
                     "Type": 1,
                     "Signature": 1,
-                    "BodyKeyPacket": key_b64,
+                    "BodyKeyPacket": self._encrypt_session_key(body_sk, recip_key),
+                    "AttachmentKeyPackets": {
+                        att_id: self._encrypt_session_key(sk, recip_key)
+                        for att_id, sk in att_sks.items()
+                    },
                 }
             packages.append(
                 {
@@ -286,9 +321,7 @@ class ProtonSender:
             )
 
         if external:
-            # Extract raw session key for cleartext delivery
-            session_key, _ = self._key_ring.decrypt_session_key(key_b64)
-            session_key_b64 = base64.b64encode(session_key).decode()
+            session_key_b64 = base64.b64encode(body_sk).decode()
 
             ext_addrs = {}
             for email in external:
@@ -305,15 +338,11 @@ class ProtonSender:
             }
             # Per-attachment session keys so the server can ship them as
             # plaintext MIME parts to non-Proton recipients.
-            if uploaded_atts:
-                attachment_keys: dict[str, dict[str, str]] = {}
-                for att_id, att_key_b64 in uploaded_atts:
-                    att_sk, _ = self._key_ring.decrypt_session_key(att_key_b64)
-                    attachment_keys[att_id] = {
-                        "Key": base64.b64encode(att_sk).decode(),
-                        "Algorithm": "aes256",
-                    }
-                ext_pkg["AttachmentKeys"] = attachment_keys
+            if att_sks:
+                ext_pkg["AttachmentKeys"] = {
+                    att_id: {"Key": base64.b64encode(sk).decode(), "Algorithm": "aes256"}
+                    for att_id, sk in att_sks.items()
+                }
             packages.append(ext_pkg)
 
         # Send (delete draft on failure to avoid orphaned drafts)
