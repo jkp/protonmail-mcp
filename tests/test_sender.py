@@ -281,7 +281,7 @@ async def test_send_not_initialized_returns_error(mock_key_ring):
     msg["To"] = "alice@example.com"
     msg.set_content("Hello")
 
-    with pytest.raises(ValueError, match="No ProtonMail address found"):
+    with pytest.raises(ValueError, match="is not one of this account.s addresses"):
         await sender.send(msg)
 
 

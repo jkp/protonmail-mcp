@@ -100,13 +100,21 @@ class ProtonSender:
                 self._address_keys[addr["Email"].lower()] = pub.pubkey
 
     def _get_address(self, from_email: str) -> tuple[dict[str, Any], pgpy.PGPKey]:
-        """Find the address and public key for a sender email."""
+        """Find the address and public key for a sender email.
+
+        An empty sender (no from_address passed or configured) means the
+        account's primary address: the lowest-Order enabled one.
+        """
+        enabled = [a for a in self._addresses if a.get("Status", 1) == 1]
+        if not from_email and enabled:
+            from_email = min(enabled, key=lambda a: a.get("Order", 0))["Email"]
         for addr in self._addresses:
             if addr["Email"].lower() == from_email.lower():
                 pub = self._address_keys.get(from_email.lower())
                 if pub:
                     return addr, pub
-        raise ValueError(f"No ProtonMail address found for {from_email}")
+        valid = ", ".join(a["Email"] for a in enabled) or "none"
+        raise ValueError(f"Sender {from_email!r} is not one of this account's addresses ({valid})")
 
     async def _classify_recipients(self, addresses: list[str]) -> dict[str, pgpy.PGPKey | None]:
         """Look up recipients: internal (Proton) ones map to their encryption
