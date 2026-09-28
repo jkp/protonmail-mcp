@@ -20,7 +20,7 @@ class TestSearch:
         if not data:
             pytest.skip("No search results to validate")
         for item in data:
-            assert "message_id" in item
+            assert "id" in item
             assert "folder" in item
             assert "subject" in item
             assert "date" in item
@@ -44,12 +44,10 @@ class TestSearchReadBack:
         """Every search result Message-ID must be readable via read_email."""
         failures = []
         for item in inbox_search_results:
-            mid = item["message_id"]
+            mid = item["id"]
             folder = item.get("folder", "")
             try:
-                result = await live_client.call_tool(
-                    "read_email", {"message_id": mid, "folder": folder}
-                )
+                result = await live_client.call_tool("read_email", {"id": mid, "folder": folder})
                 data = _parse_result(result)
                 if "error" in data:
                     failures.append(f"mid={mid} folder={folder}: {data['error']}")
@@ -66,12 +64,10 @@ class TestSearchReadBack:
         """Subject from search must match subject from read_email."""
         mismatches = []
         for item in inbox_search_results:
-            mid = item["message_id"]
+            mid = item["id"]
             folder = item.get("folder", "")
             try:
-                result = await live_client.call_tool(
-                    "read_email", {"message_id": mid, "folder": folder}
-                )
+                result = await live_client.call_tool("read_email", {"id": mid, "folder": folder})
                 data = _parse_result(result)
                 if "error" not in data and data["subject"] != item["subject"]:
                     mismatches.append(
@@ -94,12 +90,10 @@ class TestSearchAcrossFolders:
 
         failures = []
         for item in data:
-            mid = item["message_id"]
+            mid = item["id"]
             folder = item.get("folder", "")
             try:
-                result = await live_client.call_tool(
-                    "read_email", {"message_id": mid, "folder": folder}
-                )
+                result = await live_client.call_tool("read_email", {"id": mid, "folder": folder})
                 read_data = _parse_result(result)
                 if "error" in read_data:
                     failures.append(f"mid={mid}: {read_data['error']}")
@@ -116,12 +110,10 @@ class TestSearchAcrossFolders:
 
         failures = []
         for item in data:
-            mid = item["message_id"]
+            mid = item["id"]
             folder = item.get("folder", "")
             try:
-                result = await live_client.call_tool(
-                    "read_email", {"message_id": mid, "folder": folder}
-                )
+                result = await live_client.call_tool("read_email", {"id": mid, "folder": folder})
                 read_data = _parse_result(result)
                 if "error" in read_data:
                     failures.append(f"mid={mid}: {read_data['error']}")
@@ -147,8 +139,8 @@ class TestAttachmentPipeline:
         target_mid = None
         target_attachment = None
         for item in data:
-            mid = item["message_id"]
-            att_result = await live_client.call_tool("list_attachments", {"message_id": mid})
+            mid = item["id"]
+            att_result = await live_client.call_tool("list_attachments", {"id": mid})
             att_data = _parse_result(att_result)
             if isinstance(att_data, list) and att_data:
                 # Skip "not yet indexed" notes
@@ -170,7 +162,7 @@ class TestAttachmentPipeline:
         # 4. Download the attachment
         dl_result = await live_client.call_tool(
             "download_attachment",
-            {"message_id": target_mid, "filename": target_attachment["filename"]},
+            {"id": target_mid, "filename": target_attachment["filename"]},
         )
         # download_attachment returns list[str | Image]
         content = dl_result.content

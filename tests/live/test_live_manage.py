@@ -36,9 +36,7 @@ async def _send_and_wait(client: Client, test_name: str) -> dict:
 class TestArchive:
     async def test_archive_email(self, live_client: Client) -> None:
         email = await _send_and_wait(live_client, "archive")
-        result = await live_client.call_tool(
-            "archive", {"message_id": email["message_id"], "folder": "INBOX"}
-        )
+        result = await live_client.call_tool("archive", {"id": email["id"], "folder": "INBOX"})
         data = _parse_result(result)
         assert data["status"] == "archived"
 
@@ -50,7 +48,7 @@ class TestMoveEmail:
         result = await live_client.call_tool(
             "move_email",
             {
-                "message_id": email["message_id"],
+                "id": email["id"],
                 "from_folder": "INBOX",
                 "to_folder": "Trash",
             },
@@ -63,8 +61,6 @@ class TestMoveEmail:
 class TestDelete:
     async def test_delete_email(self, live_client: Client) -> None:
         email = await _send_and_wait(live_client, "delete")
-        result = await live_client.call_tool(
-            "delete", {"message_id": email["message_id"], "folder": "INBOX"}
-        )
+        result = await live_client.call_tool("delete", {"id": email["id"], "folder": "INBOX"})
         data = _parse_result(result)
         assert data["status"] == "deleted"
