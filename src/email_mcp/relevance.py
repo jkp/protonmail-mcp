@@ -16,7 +16,12 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+# Llama 3.3 70B Turbo retired on Together 2026-10-22. gpt-oss-120b at low
+# effort won a backtest on 50 real searches: keep-precision 0.51 -> 0.94, no
+# failed batches, ~3s. It reasons before answering, hence _REASONING_TOKENS.
+_MODEL = "openai/gpt-oss-120b"
+_REASONING_EFFORT = "low"
+_REASONING_TOKENS = 1000
 _API_URL = "https://api.together.xyz/v1/chat/completions"
 _RELEVANCE_THRESHOLD = 3
 
@@ -131,7 +136,7 @@ async def _llm_score(prompt: str, api_key: str, count: int) -> list[int] | None:
     # 45-result search needs 90+ tokens for the numbers alone, so the response
     # came back truncated, the score count fell short, and the caller silently
     # gave up and returned every result unfiltered.
-    max_tokens = max(100, count * 8)
+    max_tokens = max(100, count * 8) + _REASONING_TOKENS
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             _API_URL,
@@ -144,6 +149,7 @@ async def _llm_score(prompt: str, api_key: str, count: int) -> list[int] | None:
                 ],
                 "max_tokens": max_tokens,
                 "temperature": 0.0,
+                "reasoning_effort": _REASONING_EFFORT,
             },
             timeout=20,
         )
