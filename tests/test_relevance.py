@@ -229,3 +229,32 @@ class TestApplyRelevanceFilter:
         kept = _apply_relevance_filter(formatted, results, {"m0": 5})
 
         assert [f["id"] for f in kept] == [0]
+
+
+class TestRelevancePayload:
+    """Llama 3.3 70B Turbo retires on Together 2026-10-22. gpt-oss-120b at low
+    reasoning effort replaced it after a backtest on 50 real searches (keep-
+    precision 0.51 -> 0.94, no failed batches). It reasons before answering, so
+    the token budget must leave room for that or the scores come back truncated.
+    """
+
+    async def test_uses_gpt_oss_with_low_reasoning_and_headroom(self) -> None:
+        from unittest.mock import MagicMock
+
+        from email_mcp.relevance import _llm_score
+
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"choices": [{"message": {"content": "5,3,1"}}]}
+        with patch("email_mcp.relevance.httpx.AsyncClient") as client_cls:
+            client = AsyncMock()
+            client.post.return_value = resp
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=None)
+            client_cls.return_value = client
+
+            assert await _llm_score("prompt", "key", 3) == [5, 3, 1]
+
+        payload = client.post.call_args.kwargs["json"]
+        assert payload["model"] == "openai/gpt-oss-120b"
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_tokens"] >= 3 * 8 + 1000

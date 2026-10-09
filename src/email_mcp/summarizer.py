@@ -1,8 +1,8 @@
 """Lazy email summarizer using Together API.
 
 Generates 2-3 sentence summaries of emails on demand, caches in the
-summary column of the messages table. Uses a fast model (Llama 3.3 70B
-Turbo) for low latency and cost.
+summary column of the messages table. Uses gpt-oss-120b at low reasoning
+effort for low latency and cost.
 
 Summaries are generated in parallel for search results that don't have
 one cached yet. Typical wall time: <500ms for 20 emails.
@@ -20,7 +20,10 @@ from email_mcp.db import Database
 
 logger = structlog.get_logger(__name__)
 
-_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+_MODEL = "openai/gpt-oss-120b"
+_REASONING_EFFORT = "low"
+# Reasoning tokens count against this; 150 left the answer no slack.
+_MAX_TOKENS = 400
 _API_URL = "https://api.together.xyz/v1/chat/completions"
 _MAX_BODY_CHARS = 2000
 
@@ -129,8 +132,9 @@ async def _llm_summarize(text: str, api_key: str) -> str | None:
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": text},
                 ],
-                "max_tokens": 150,
+                "max_tokens": _MAX_TOKENS,
                 "temperature": 0.0,
+                "reasoning_effort": _REASONING_EFFORT,
             },
             timeout=10,
         )
