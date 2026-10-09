@@ -153,3 +153,27 @@ class TestSummarize:
         _insert_message(db, "pm-1")  # no body
         results = await summarize_messages(["pm-1"], db, api_key="test-key")
         assert "pm-1" not in results
+
+
+class TestSummarizerPayload:
+    async def test_uses_gpt_oss_with_low_reasoning_and_headroom(self) -> None:
+        """Reasoning tokens count against max_tokens; 150 left no slack."""
+        from unittest.mock import MagicMock
+
+        from email_mcp.summarizer import _llm_summarize
+
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"choices": [{"message": {"content": "A summary."}}]}
+        with patch("email_mcp.summarizer.httpx.AsyncClient") as client_cls:
+            client = AsyncMock()
+            client.post.return_value = resp
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=None)
+            client_cls.return_value = client
+
+            assert await _llm_summarize("From: a\n\nbody", "key") == "A summary."
+
+        payload = client.post.call_args.kwargs["json"]
+        assert payload["model"] == "openai/gpt-oss-120b"
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_tokens"] >= 400
